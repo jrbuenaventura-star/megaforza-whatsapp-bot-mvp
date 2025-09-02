@@ -7,7 +7,11 @@ export default async function Page(){
   return (
     <div>
       <h1>Clientes</h1>
-      <table border="1" cellPadding="8" style={ borderCollapse:'collapse', width:'100%', background:'#fff' }>
+      <table
+  border={1}
+  cellPadding={8}
+  style={{ borderCollapse: 'collapse', width: '100%', background: '#fff' }}
+>
         <thead><tr><th>name</th><th>doc_type</th><th>doc_number</th><th>billing_email</th><th>whatsapp_phone</th><th>discount_pct</th><th>created_at</th></tr></thead>
         <tbody>
           {data.map((row,idx)=> (

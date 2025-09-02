@@ -11,7 +11,9 @@ dotenv.config();
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
-
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
 app.get("/webhook", (req,res)=>{
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];

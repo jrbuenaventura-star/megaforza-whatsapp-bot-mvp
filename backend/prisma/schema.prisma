@@ -16,7 +16,7 @@ model Customer {
   whatsapp_phone String   @unique
   discount_pct   Decimal  @db.Decimal(5, 4) @default(0) // 0.0500 = 5%
   created_at     DateTime @default(now())
-
+  discounts   CustomerProductDiscount[]
   orders         Order[]
 }
 
@@ -33,13 +33,16 @@ model Product {
 }
 
 model CustomerProductDiscount {
-  customer   Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
-  customer_id String
-  product    Product  @relation(fields: [product_id], references: [id], onDelete: Cascade)
-  product_id String
-  discount_pct Decimal
+  id           String   @id @default(uuid())
+  customer_id  String
+  product_id   String
+  discount_pct Decimal  @db.Decimal(5,4) @default(0)
 
-  @@id([customer_id, product_id])
+  customer     Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+  product      Product  @relation(fields: [product_id], references: [id], onDelete: Cascade)
+
+  @@unique([customer_id, product_id])  // 1 descuento por cliente y producto
+  @@index([product_id])
 }
 enum DocType {
   CEDULA
@@ -78,6 +81,8 @@ model OrderItem {
   qty       Int
   unit_net  Int
   subtotal  Int
+  product_id  String?
+  product     Product?   @relation(fields: [product_id], references: [id])
 }
 
 model CapacityConfig {

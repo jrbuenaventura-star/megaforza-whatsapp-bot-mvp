@@ -10,17 +10,13 @@ datasource db {
 model Customer {
   id             String   @id @default(uuid())
   name           String
-  doc_type       String
+  doc_type       DocType              // ← ENUM (no String)
   doc_number     String
-  nit_dv         String?
   billing_email  String
   whatsapp_phone String   @unique
-  rut_url        String?
-  camara_url     String?
-  discount_pct   Decimal  @default(0)
+  discount_pct   Decimal  @db.Decimal(5, 4) @default(0) // 0.0500 = 5%
   created_at     DateTime @default(now())
 
-  discounts      CustomerProductDiscount[]
   orders         Order[]
 }
 
@@ -45,43 +41,43 @@ model CustomerProductDiscount {
 
   @@id([customer_id, product_id])
 }
-
+enum DocType {
+  CEDULA
+  NIT
+}
 enum OrderStatus {
-  pending_payment
-  paid
-  scheduled
-  in_production
-  delivered
-  canceled
+  PENDING
+  SCHEDULED
+  IN_PRODUCTION
+  READY
+  DELIVERED
+  CANCELLED
 }
 
 model Order {
-  id              String      @id @default(uuid())
-  customer        Customer    @relation(fields: [customer_id], references: [id])
-  customer_id     String
-  status          OrderStatus
-  total_bags      Int         @default(0)
-  subtotal        Decimal     @default(0)
-  discount_total  Decimal     @default(0)
-  total           Decimal     @default(0)
-  payment_proof_url String?
-  scheduled_at    DateTime?
-  ready_at        DateTime?
-  created_at      DateTime    @default(now())
+  id            String      @id @default(uuid())
+  customer_id   String
+  customer      Customer    @relation(fields: [customer_id], references: [id])
 
-  items           OrderItem[]
+  status        OrderStatus @default(PENDING)
+  total_bags    Int
+  total_net     Int
+  scheduled_at  DateTime?
+  delivered_at  DateTime?   // ← con esto podremos sacarlo del backlog
+  created_at    DateTime    @default(now())
+
+  items         OrderItem[]
 }
 
 model OrderItem {
-  id                   String   @id @default(uuid())
-  order                Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  order_id             String
-  product              Product  @relation(fields: [product_id], references: [id])
-  product_id           String
-  qty_bags             Int
-  unit_price           Decimal
-  discount_pct_applied Decimal  @default(0)
-  line_total           Decimal
+  id        String @id @default(uuid())
+  order_id  String
+  order     Order  @relation(fields: [order_id], references: [id])
+  sku       String
+  name      String
+  qty       Int
+  unit_net  Int
+  subtotal  Int
 }
 
 model CapacityConfig {
@@ -93,4 +89,12 @@ model CapacityConfig {
   workdays               String   @default("Mon,Tue,Wed,Thu,Fri,Sat")
   timezone               String   @default("America/Bogota")
   dispatch_buffer_min    Int      @default(60)
+}
+model TempCart {
+  whatsapp_phone String  @id
+  items_json     String
+  total_bags     Int
+  total_net      Int
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
 }

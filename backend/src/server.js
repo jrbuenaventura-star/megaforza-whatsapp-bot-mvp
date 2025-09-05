@@ -6,6 +6,84 @@ import { prisma } from "./db.js";
 import { router as api } from "./routes.js";
 import { sendText } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
+import { PrismaClient } from '@prisma/client';
+
+const app = express();
+const prisma = new PrismaClient();
+app.use(bodyParser.json());
+// Helper para enviar texto por WhatsApp (usa tu propia función si ya la tienes)
+async function sendText(to, text) {
+  // TODO: reemplazar por tu envío real via Graph API
+  console.log('sendText ->', to, text);
+}
+// --------- WEBHOOK DE WHATSAPP ---------
+app.post('/webhook', async (req, res) => {
+  try {
+    const change = req.body?.entry?.[0]?.changes?.[0]?.value;
+    const msg = change?.messages?.[0];
+
+    // <<<<<< ESTA LINEA YA ESTÁ DENTRO DE UNA FUNCIÓN >>>>>>
+    if (!msg) { 
+      res.sendStatus(200); 
+      return; 
+    }
+
+    const from = msg.from;
+    const body = msg.text?.body?.trim() ?? '';
+
+    // Si no existe cliente, dirigir a onboarding paso-a-paso
+    const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+    if (!customer) {
+      // arrancar flujo si escribe REGISTRAR o si no hay cliente aún
+      if (body.toLowerCase() === 'registrar') {
+        await prisma.onboarding.upsert({
+          where: { whatsapp_phone: from },
+          update: { state: 'ASK_NAME' },
+          create: { whatsapp_phone: from, state: 'ASK_NAME' }
+        });
+        await sendText(from, '¡Hola! Empecemos. ¿Cuál es tu *Nombre* (persona o empresa)?');
+        res.sendStatus(200);
+        return;
+      }
+      await handleOnboarding(from, body);
+      res.sendStatus(200);
+      return;
+    }
+
+    // ---- Cliente ya registrado: comandos normales ----
+    if (body.toLowerCase() === 'catalogo' || body.toLowerCase() === 'catálogo') {
+      await sendText(from, 'Te envío el catálogo…');
+      res.sendStatus(200);
+      return;
+    }
+
+    if (body.toLowerCase() === 'pedir') {
+      await sendText(from, 'Perfecto, dime el producto y cantidad…');
+      res.sendStatus(200);
+      return;
+    }
+
+    // Mensaje por defecto
+    await sendText(from, 'Escribe *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.');
+    res.sendStatus(200);
+
+  } catch (err) {
+    console.error(err);
+    // WhatsApp exige 200 siempre
+    res.sendStatus(200);
+  }
+});
+
+// Health
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
+
+// Arrancar server con el puerto de Render
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Backend running on http://localhost:${PORT}`);
+});
 
 function stripAccents(str) {
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');

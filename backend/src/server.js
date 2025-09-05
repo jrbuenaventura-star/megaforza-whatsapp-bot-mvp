@@ -1,90 +1,36 @@
-import express from "express";
-import bodyParser from "body-parser";
-import cors from "cors";
-import dotenv from "dotenv";
-import { prisma } from "./db.js";
-import { router as api } from "./routes.js";
-import { sendText } from "./wa.js";
-import { scheduleOrderForItems } from "./scheduler.js";
-import { PrismaClient } from '@prisma/client';
+// backend/src/server.js
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+
+import { prisma } from './db.js';                // ✅ una sola instancia centralizada
+import { router as api } from './routes.js';
+import { sendText } from './wa.js';              // usa el helper real que ya tienes
+import { scheduleOrderForItems } from './scheduler.js';
 
 const app = express();
-const prisma = new PrismaClient();
+app.use(cors());
 app.use(bodyParser.json());
-// Helper para enviar texto por WhatsApp (usa tu propia función si ya la tienes)
-async function sendText(to, text) {
-  // TODO: reemplazar por tu envío real via Graph API
-  console.log('sendText ->', to, text);
-}
-// --------- WEBHOOK DE WHATSAPP ---------
-app.post('/webhook', async (req, res) => {
-  try {
-    const change = req.body?.entry?.[0]?.changes?.[0]?.value;
-    const msg = change?.messages?.[0];
 
-    // <<<<<< ESTA LINEA YA ESTÁ DENTRO DE UNA FUNCIÓN >>>>>>
-    if (!msg) { 
-      res.sendStatus(200); 
-      return; 
-    }
-
-    const from = msg.from;
-    const body = msg.text?.body?.trim() ?? '';
-
-    // Si no existe cliente, dirigir a onboarding paso-a-paso
-    const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
-    if (!customer) {
-      // arrancar flujo si escribe REGISTRAR o si no hay cliente aún
-      if (body.toLowerCase() === 'registrar') {
-        await prisma.onboarding.upsert({
-          where: { whatsapp_phone: from },
-          update: { state: 'ASK_NAME' },
-          create: { whatsapp_phone: from, state: 'ASK_NAME' }
-        });
-        await sendText(from, '¡Hola! Empecemos. ¿Cuál es tu *Nombre* (persona o empresa)?');
-        res.sendStatus(200);
-        return;
-      }
-      await handleOnboarding(from, body);
-      res.sendStatus(200);
-      return;
-    }
-
-    // ---- Cliente ya registrado: comandos normales ----
-    if (body.toLowerCase() === 'catalogo' || body.toLowerCase() === 'catálogo') {
-      await sendText(from, 'Te envío el catálogo…');
-      res.sendStatus(200);
-      return;
-    }
-
-    if (body.toLowerCase() === 'pedir') {
-      await sendText(from, 'Perfecto, dime el producto y cantidad…');
-      res.sendStatus(200);
-      return;
-    }
-
-    // Mensaje por defecto
-    await sendText(from, 'Escribe *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.');
-    res.sendStatus(200);
-
-  } catch (err) {
-    console.error(err);
-    // WhatsApp exige 200 siempre
-    res.sendStatus(200);
-  }
-});
-
-// Health
+// --------- Health check ---------
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-// Arrancar server con el puerto de Render
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
+// --------- Verificación de webhook (GET) ---------
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
 });
 
+// --------- Utilidades de validación ---------
 function stripAccents(str) {
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
@@ -94,10 +40,11 @@ function isEmail(s) {
 function normalizeDocType(txt) {
   const t = stripAccents(txt).trim().toLowerCase();
   if (t === 'nit') return 'NIT';
-  if (t === 'cedula' || t === 'cedúla' || t === 'cedula ') return 'Cédula';
+  if (t === 'cedula' || t === 'cedúla' || t === 'cédula') return 'Cédula';
   return null;
 }
-// --- Manejador de onboarding paso-a-paso ---
+
+// --------- Onboarding paso-a-paso ---------
 async function handleOnboarding(from, body) {
   const lower = (body || '').trim().toLowerCase();
 
@@ -227,114 +174,127 @@ async function handleOnboarding(from, body) {
     }
   }
 }
-// Extrae el mensaje entrante según tu parseo actual:
-const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-if (!msg) return res.sendStatus(200);
 
-const from = msg.from;                       // teléfono del cliente
-const body = (msg.text?.body || '').trim();  // texto del cliente
+// --------- Webhook de WhatsApp (POST) ---------
+app.post('/webhook', async (req, res) => {
+  try {
+    const change = req.body?.entry?.[0]?.changes?.[0]?.value;
+    const msg = change?.messages?.[0];
+    if (!msg) { res.sendStatus(200); return; }
 
-// 1) Si no existe cliente, dirijo al onboarding paso-a-paso
-const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
-
-if (!customer) {
-  // atajo para empezar explícitamente
-  if (body.toLowerCase() === 'registrar') {
-    await prisma.onboarding.upsert({
-      where: { whatsapp_phone: from },
-      update: { state: 'ASK_NAME' },
-      create: { whatsapp_phone: from, state: 'ASK_NAME' }
-    });
-    await sendText(from, '¡Hola! Empecemos. ¿Cuál es tu *Nombre* (persona o empresa)?');
-    return res.sendStatus(200);
-  }
-
-  // si no hay cliente, siempre procesa onboarding
-  await handleOnboarding(from, body);
-  return res.sendStatus(200);
-}
-
-// 2) Aquí abajo ya es cliente -> maneja CATALOGO / PEDIR / etc.
-//    (Deja tu lógica actual para productos/pedidos)
-dotenv.config();
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true, ts: new Date().toISOString() });
-});
-app.get("/webhook", (req,res)=>{
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if(mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN){
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
-});
-
-app.post("/webhook", async (req,res)=>{
-  try{
-    const entry = req.body.entry?.[0]?.changes?.[0]?.value;
-    const msg = entry?.messages?.[0];
-    if(!msg) return res.sendStatus(200);
     const from = msg.from;
-    const text = msg.text?.body?.trim() || "";
+    const body = msg.text?.body?.trim() ?? '';
 
+    // 1) Si no existe cliente, dirigir al onboarding
     let customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
-    if(!customer){
-      await sendText(from, "¡Hola! Soy el asistente de Megaforza. Para crear tu cuenta envíanos: Nombre, NIT o Cédula y correo de facturación. Luego podrás adjuntar tu RUT y Certificado de Cámara de Comercio (≤30 días).");
-      return res.sendStatus(200);
+    if (!customer) {
+      if (body.toLowerCase() === 'registrar') {
+        await prisma.onboarding.upsert({
+          where: { whatsapp_phone: from },
+          update: { state: 'ASK_NAME' },
+          create: { whatsapp_phone: from, state: 'ASK_NAME' }
+        });
+        await sendText(from, '¡Hola! Empecemos. ¿Cuál es tu *Nombre* (persona o empresa)?');
+        res.sendStatus(200);
+        return;
+      }
+      await handleOnboarding(from, body);
+      res.sendStatus(200);
+      return;
     }
 
-    if(/[xX]\s*\d+/.test(text)){
-      const pairs = text.split(/[;\n]+/);
+    // 2) Cliente ya registrado: comandos
+    if (['catalogo','catálogo'].includes(body.toLowerCase())) {
+      await sendText(from, 'Te envío el catálogo…');
+      res.sendStatus(200);
+      return;
+    }
+
+    if (body.toLowerCase() === 'pedir') {
+      await sendText(from, 'Perfecto, dime el producto y cantidad en formato "SKU x cantidad; ..."');
+      res.sendStatus(200);
+      return;
+    }
+
+    // 3) Interpretar pedido tipo "SKU x 100; LEC-18P x 1200"
+    if (/[xX]\s*\d+/.test(body)) {
+      const parts = body.split(/[;\n]+/);
       const items = [];
-      for(const p of pairs){
+      for (const p of parts) {
         const m = p.match(/([A-Za-z0-9\-]+)\s*[xX]\s*(\d+)/);
-        if(m){
-          const sku = m[1].trim(); const qty = parseInt(m[2],10);
+        if (m) {
+          const sku = m[1].trim();
+          const qty = parseInt(m[2], 10);
           const prod = await prisma.product.findUnique({ where: { sku } });
-          if(prod){ items.push({ product_id: prod.id, qty_bags: qty, pelletized: prod.pelletized }); }
+          if (prod) items.push({ product_id: prod.id, qty_bags: qty, pelletized: prod.pelletized });
         }
       }
-      if(items.length){
+
+      if (items.length) {
         const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
         const sch = await scheduleOrderForItems(items, new Date(), cfg);
-        const prods = await prisma.product.findMany({ where: { id: { in: items.map(i=>i.product_id) } } });
-        const map = new Map(prods.map(p=>[p.id,p]));
-        let subtotal=0, discount_total=0, total_bags=0;
+        const prods = await prisma.product.findMany({ where: { id: { in: items.map(i => i.product_id) } } });
+        const map = new Map(prods.map(p => [p.id, p]));
+
+        let subtotal = 0, discount_total = 0, total_bags = 0;
         const orderItemsData = [];
-        for(const it of items){
+
+        const disc = Number(customer.discount_pct || 0); // ✅ descuento por cliente
+        for (const it of items) {
           const p = map.get(it.product_id);
-          const unit = Number(p.price_per_bag||0);
+          const unit = Number(p.price_per_bag || 0);
           const qty = it.qty_bags;
           total_bags += qty;
-          const disc = Number(customer.discount_pct||0);
-          subtotal += qty*unit;
-          discount_total += qty*unit*disc/100;
-          orderItemsData.push({ product_id: p.id, qty_bags: qty, unit_price: unit, discount_pct_applied: disc, line_total: qty*unit*(1-disc/100) });
+          subtotal += qty * unit;
+          discount_total += qty * unit * disc / 100;
+          orderItemsData.push({
+            product_id: p.id,
+            qty_bags: qty,
+            unit_price: unit,
+            discount_pct_applied: disc,
+            line_total: qty * unit * (1 - disc / 100)
+          });
         }
         const total = subtotal - discount_total;
+
         const order = await prisma.order.create({
-          data: { customer_id: customer.id, status: 'pending_payment', total_bags, subtotal, discount_total, total, items: { create: orderItemsData }, scheduled_at: sch.scheduled_at, ready_at: sch.ready_at }
+          data: {
+            customer_id: customer.id,
+            status: 'pending_payment',
+            total_bags,
+            subtotal,
+            discount_total,
+            total,
+            items: { create: orderItemsData },
+            scheduled_at: sch.scheduled_at,
+            ready_at: sch.ready_at
+          }
         });
-        await sendText(from, `Tu pedido #${order.id.slice(0,8)} está pre-agendado. Total: $${total.toFixed(2)}. Envía el soporte de pago para confirmar. Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO',{ timeZone:'America/Bogota'})}`);
-        return res.sendStatus(200);
+
+        await sendText(
+          from,
+          `Tu pedido #${order.id.slice(0, 8)} está pre-agendado. Total: $${total.toFixed(2)}. ` +
+          `Envía el soporte de pago para confirmar. Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`
+        );
+        res.sendStatus(200);
+        return;
       }
     }
 
-    await sendText(from, "Escribe tu pedido como: SKU x cantidad; SKU x cantidad (ej: LEC-18P x 1200; SUP-GAN x 300). También puedes pedir el *catálogo* o *estado de pedidos*.");
-    return res.sendStatus(200);
-  }catch(e){
+    // 4) Respuesta por defecto
+    await sendText(from, 'Escribe *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.\nEjemplo de pedido: `LEC-18P x 1200; SUP-GAN x 300`');
+    res.sendStatus(200);
+  } catch (e) {
     console.error(e);
-    return res.sendStatus(200);
+    res.sendStatus(200); // WhatsApp exige 200 siempre
   }
 });
 
-app.use("/api", api);
+// --------- API REST del panel ---------
+app.use('/api', api);
 
-const port = process.env.PORT || 3000;
+// --------- Arrancar servidor ---------
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend running on http://localhost:${PORT}`);
-});
+});   

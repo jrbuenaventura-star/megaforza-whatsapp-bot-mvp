@@ -7,6 +7,177 @@ import { router as api } from "./routes.js";
 import { sendText } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 
+function stripAccents(str) {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+function isEmail(s) {
+  return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(s.trim());
+}
+function normalizeDocType(txt) {
+  const t = stripAccents(txt).trim().toLowerCase();
+  if (t === 'nit') return 'NIT';
+  if (t === 'cedula' || t === 'cedúla' || t === 'cedula ') return 'Cédula';
+  return null;
+}
+// --- Manejador de onboarding paso-a-paso ---
+async function handleOnboarding(from, body) {
+  const lower = (body || '').trim().toLowerCase();
+
+  // Comandos globales
+  if (['cancelar', 'salir'].includes(lower)) {
+    await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
+    await sendText(from, '🚪 Registro cancelado. Escribe *REGISTRAR* cuando quieras retomarlo.');
+    return;
+  }
+  if (['reiniciar', 'reset', 'empezar'].includes(lower)) {
+    await prisma.onboarding.upsert({
+      where: { whatsapp_phone: from },
+      update: { state: 'ASK_NAME', draft_name: null, draft_doc_type: null, draft_doc_number: null, draft_email: null },
+      create: { whatsapp_phone: from, state: 'ASK_NAME' }
+    });
+    await sendText(from, '🔄 Empecemos de nuevo. ¿Cuál es tu *Nombre* (persona o empresa)?');
+    return;
+  }
+
+  // Crea/obtiene sesión
+  let s = await prisma.onboarding.upsert({
+    where: { whatsapp_phone: from },
+    update: {},
+    create: { whatsapp_phone: from, state: 'ASK_NAME' }
+  });
+
+  switch (s.state) {
+    case 'ASK_NAME': {
+      if (!body.trim()) {
+        await sendText(from, '¿Cuál es tu *Nombre* (persona o empresa)?');
+        return;
+      }
+      s = await prisma.onboarding.update({
+        where: { whatsapp_phone: from },
+        data: { draft_name: body.trim(), state: 'ASK_DOC_TYPE' }
+      });
+      await sendText(from, '¿Tu documento es *Cédula* o *NIT*? (escribe exactamente: *Cédula* o *NIT*)');
+      return;
+    }
+
+    case 'ASK_DOC_TYPE': {
+      const t = normalizeDocType(body);
+      if (!t) {
+        await sendText(from, 'Por favor escribe *Cédula* o *NIT* (solo esos dos).');
+        return;
+      }
+      s = await prisma.onboarding.update({
+        where: { whatsapp_phone: from },
+        data: { draft_doc_type: t, state: 'ASK_DOC_NUMBER' }
+      });
+      await sendText(from, `Perfecto. Escribe tu número de *${t}* (solo números).`);
+      return;
+    }
+
+    case 'ASK_DOC_NUMBER': {
+      const digits = body.replace(/\D/g, '');
+      if (!digits) {
+        await sendText(from, 'El número debe contener solo dígitos. Inténtalo de nuevo.');
+        return;
+      }
+      s = await prisma.onboarding.update({
+        where: { whatsapp_phone: from },
+        data: { draft_doc_number: digits, state: 'ASK_EMAIL' }
+      });
+      await sendText(from, 'Ahora escribe tu *correo de facturación* (ej: nombre@empresa.com).');
+      return;
+    }
+
+    case 'ASK_EMAIL': {
+      if (!isEmail(body)) {
+        await sendText(from, 'El correo no es válido. Prueba con otro (ej: nombre@empresa.com).');
+        return;
+      }
+      s = await prisma.onboarding.update({
+        where: { whatsapp_phone: from },
+        data: { draft_email: body.trim(), state: 'CONFIRM' }
+      });
+      await sendText(
+        from,
+        `Por favor confirma:\n• Nombre: ${s.draft_name}\n• Documento: ${s.draft_doc_type} ${s.draft_doc_number}\n• Correo: ${s.draft_email}\n\nResponde *SI* para guardar o *EDITAR* para cambiar (ej: "editar nombre").`
+      );
+      return;
+    }
+
+    case 'CONFIRM': {
+      if (lower === 'si' || lower === 'sí') {
+        const exists = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+        if (!exists) {
+          await prisma.customer.create({
+            data: {
+              name: s.draft_name,
+              doc_type: s.draft_doc_type,         // "Cédula" | "NIT"
+              doc_number: s.draft_doc_number,
+              billing_email: s.draft_email,
+              whatsapp_phone: from,
+              discount_pct: 0
+            }
+          });
+        }
+        await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
+        await sendText(from, '✅ ¡Registrado! Ya puedes escribir *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.');
+        return;
+      }
+
+      if (lower.startsWith('editar')) {
+        if (lower.includes('nombre')) {
+          await prisma.onboarding.update({ where: { whatsapp_phone: from }, data: { state: 'ASK_NAME' } });
+          await sendText(from, 'Escribe el *Nombre* correcto:');
+          return;
+        }
+        if (lower.includes('documento')) {
+          await prisma.onboarding.update({ where: { whatsapp_phone: from }, data: { state: 'ASK_DOC_TYPE' } });
+          await sendText(from, '¿Tu documento es *Cédula* o *NIT*?');
+          return;
+        }
+        if (lower.includes('correo') || lower.includes('email')) {
+          await prisma.onboarding.update({ where: { whatsapp_phone: from }, data: { state: 'ASK_EMAIL' } });
+          await sendText(from, 'Escribe el *correo de facturación* correcto:');
+          return;
+        }
+        await sendText(from, 'Indica qué quieres editar: *editar nombre*, *editar documento* o *editar correo*.');
+        return;
+      }
+
+      await sendText(from, 'Responde *SI* para guardar, o escribe *EDITAR* para cambiar algún dato.');
+      return;
+    }
+  }
+}
+// Extrae el mensaje entrante según tu parseo actual:
+const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+if (!msg) return res.sendStatus(200);
+
+const from = msg.from;                       // teléfono del cliente
+const body = (msg.text?.body || '').trim();  // texto del cliente
+
+// 1) Si no existe cliente, dirijo al onboarding paso-a-paso
+const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+
+if (!customer) {
+  // atajo para empezar explícitamente
+  if (body.toLowerCase() === 'registrar') {
+    await prisma.onboarding.upsert({
+      where: { whatsapp_phone: from },
+      update: { state: 'ASK_NAME' },
+      create: { whatsapp_phone: from, state: 'ASK_NAME' }
+    });
+    await sendText(from, '¡Hola! Empecemos. ¿Cuál es tu *Nombre* (persona o empresa)?');
+    return res.sendStatus(200);
+  }
+
+  // si no hay cliente, siempre procesa onboarding
+  await handleOnboarding(from, body);
+  return res.sendStatus(200);
+}
+
+// 2) Aquí abajo ya es cliente -> maneja CATALOGO / PEDIR / etc.
+//    (Deja tu lógica actual para productos/pedidos)
 dotenv.config();
 const app = express();
 app.use(cors());

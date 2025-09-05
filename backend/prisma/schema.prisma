@@ -103,3 +103,13 @@ model TempCart {
   created_at     DateTime @default(now())
   updated_at     DateTime @updatedAt
 }
+model Onboarding {
+  whatsapp_phone   String   @id
+  state            String   @default("ASK_NAME")
+  draft_name       String?
+  draft_doc_type   String?  // "Cédula" | "NIT"
+  draft_doc_number String?
+  draft_email      String?
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+}

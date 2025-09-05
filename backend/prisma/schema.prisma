@@ -64,7 +64,6 @@ model Order {
 
   status        OrderStatus @default(PENDING)
   total_bags    Int
-  total_net     Int
   scheduled_at  DateTime?
   delivered_at  DateTime?   // ← con esto podremos sacarlo del backlog
   created_at    DateTime    @default(now())

@@ -257,6 +257,6 @@ app.post("/webhook", async (req,res)=>{
 app.use("/api", api);
 
 const port = process.env.PORT || 3000;
-app.listen(port, ()=>{
-  console.log(`Backend running on http://localhost:${port}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Backend running on http://localhost:${PORT}`);
 });

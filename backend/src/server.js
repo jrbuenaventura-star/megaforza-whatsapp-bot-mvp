@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-
+import { sendText, sendButtons } from './wa.js';
 import { prisma } from './db.js';                // ✅ una sola instancia centralizada
 import { router as api } from './routes.js';
 import { sendText } from './wa.js';              // usa el helper real que ya tienes
@@ -149,24 +149,25 @@ async function handleOnboarding(from, body) {
     }
 
     case 'CONFIRM': {
-      if (lower === 'si' || lower === 'sí') {
-        const exists = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
-        const docTypeCode = normalizeDocType(s.draft_doc_type) || s.draft_doc_type;
-        if (!exists) {
-          await prisma.customer.create({
-            data: {
-              name: s.draft_name,
-              doc_type: docTypeCode,         // "Cédula" | "NIT"
-              doc_number: s.draft_doc_number,
-              billing_email: s.draft_email,
-              whatsapp_phone: from,
-              discount_pct: 0
-            }
-          });
+  if (lower === 'si' || lower === 'sí') {
+    const exists = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+    const docTypeCode = normalizeDocType(s.draft_doc_type) || s.draft_doc_type; // 'CEDULA' | 'NIT'
+    if (!exists) {
+      await prisma.customer.create({
+        data: {
+          name: s.draft_name,
+          doc_type: docTypeCode,           // ⚠️ ENUM: 'CEDULA' o 'NIT'
+          doc_number: s.draft_doc_number,
+          billing_email: s.draft_email,
+          whatsapp_phone: from,
+          discount_pct: 0
         }
-        await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
-        import fetch from 'node-fetch'; // si no lo tienes ya
-
+      });
+    }
+    await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
+    await sendButtons(from);
+    return;
+  }
 async function sendButtons(to) {
   const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
   const payload = {

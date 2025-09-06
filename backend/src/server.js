@@ -174,7 +174,7 @@ async function handleOnboarding(from, body) {
     }
   }
 }
-
+app.use(express.json());
 // --------- Webhook de WhatsApp (POST) ---------
 app.post('/webhook', async (req, res) => {
   try {

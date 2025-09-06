@@ -37,9 +37,9 @@ function isEmail(s) {
   return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(s.trim());
 }
 function normalizeDocType(txt) {
-  const t = stripAccents(txt).trim().toLowerCase();
+  const t = stripAccents((txt || '').trim()).toLowerCase();
   if (t === 'nit') return 'NIT';
-  if (t === 'cedula' || t === 'cedúla' || t === 'cédula') return 'Cédula';
+  if (t === 'cedula') return 'CEDULA';   // <-- SIN tilde y en mayúsculas
   return null;
 }
 

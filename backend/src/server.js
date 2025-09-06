@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { sendText, sendButtons } from './wa.js';
+import { sendText, sendButtons, sendMultiProduct } from './wa.js';
 import { prisma } from './db.js';                // ✅ una sola instancia centralizada
 import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
@@ -176,9 +176,13 @@ async function handleOnboarding(from, body) {
       });
     }
     await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
-    await sendButtons(from);  // 👈 muestra “Ver tienda” / “Pedir por chat”
+    await sendButtons(from, "🎉 Registro completo. ¿Cómo quieres continuar?");
+    // (opcional) muestra 6–10 SKUs rápidos
+    const top = await prisma.product.findMany({ where:{ active:true }, orderBy:{ name:'asc' }, take:8 });
+    if (top.length) await sendMultiProduct(from, top.map(p => p.sku));
     return;
   }
+  ...
 }
     await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
     await sendButtons(from);
@@ -286,6 +290,37 @@ app.post('/webhook', async (req, res) => {
       await handleOnboarding(from, body);
       return res.sendStatus(200);
     }
+if (msg.type === 'interactive') {
+  const btnId =
+    msg.interactive?.button_reply?.id   // botones "reply"
+    || msg.interactive?.list_reply?.id   // (por si usas listas)
+    || msg.button?.payload;              // fallback
+
+  if (btnId === 'go_catalog') {
+    await sendText(
+      from,
+      '🛍️ Abre nuestro *perfil de WhatsApp* y toca **Ver tienda**. ' +
+      'También puedes enviarme el carrito o escribir el pedido por chat.'
+    );
+    // (opcional) enviar una lista corta de productos
+    // const top = await prisma.product.findMany({ where:{active:true}, orderBy:{name:'asc'}, take:8 });
+    // if (top.length) await sendMultiProduct(from, top.map(p => p.sku));
+    return res.sendStatus(200);
+  }
+
+  if (btnId === 'start_order') {
+    await sendText(
+      from,
+      '🧾 Escribe tu pedido así:\n`SKU x cantidad; SKU x cantidad`\n' +
+      'Ej.: `LEC-18P x 1200; SUP-GAN x 300`'
+    );
+    // (opcional) sugerir 6–8 SKUs
+    // const top = await prisma.product.findMany({ where:{active:true}, orderBy:{name:'asc'}, take:8 });
+    // if (top.length) await sendMultiProduct(from, top.map(p => p.sku));
+    return res.sendStatus(200);
+  }
+}
+/* ──────────────────────────────────────────────────────────────── */
 
     // 6) Cliente ya registrado → comandos conocidos
     if (lower === 'catalogo' || lower === 'catálogo') {
@@ -306,26 +341,7 @@ app.post('/webhook', async (req, res) => {
       );
       return res.sendStatus(200);
     }
-    const btnId =
-  req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.interactive?.button_reply?.id
-  || req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.button?.payload;
 
-if (btnId === 'go_catalog') {
-  await sendText(
-    from,
-    '🛍️ Abre nuestro *perfil de WhatsApp* y toca **Ver tienda** para ver el catálogo y precios.'
-  );
-  return res.sendStatus(200);
-}
-if (btnId === 'start_order') {
-  await sendText(
-    from,
-    '🧾 Escribe tu pedido como:\n' +
-    '`SKU x cantidad; SKU x cantidad`\n' +
-    'Ej.: `LEC-18P x 1200; SUP-GAN x 300`'
-  );
-  return res.sendStatus(200);
-}
     // 7) ¿Envió un pedido tipo "SKU x cantidad"?
     if (/[xX]\s*\d+/.test(body)) {
       const parts = body.split(/[;\n]+/);

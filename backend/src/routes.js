@@ -138,3 +138,18 @@ router.get("/reports/pendingByCustomer", async (req,res)=>{
   }
   res.json(report);
 });
+// GET /api/__diag/db
+router.get("/__diag/db", async (req, res) => {
+  try {
+    const one = await prisma.$queryRaw`select 1 as ok`;
+    const count = await prisma.customer.count();
+    res.json({ ok: true, ping: one, customer_count: count });
+  } catch (e) {
+    console.error("DB DIAG error:", e);
+    res.status(500).json({
+      ok: false,
+      message: String(e?.message || e),
+      code: e?.code || null
+    });
+  }
+});

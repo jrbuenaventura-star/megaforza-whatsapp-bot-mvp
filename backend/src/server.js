@@ -5,7 +5,6 @@ import cors from 'cors';
 import { sendText, sendButtons } from './wa.js';
 import { prisma } from './db.js';                // ✅ una sola instancia centralizada
 import { router as api } from './routes.js';
-import { sendText } from './wa.js';              // usa el helper real que ya tienes
 import { scheduleOrderForItems } from './scheduler.js';
 
 const app = express();
@@ -46,17 +45,23 @@ function docTypeLabel(code) {
   return code === 'CEDULA' ? 'Cédula' : 'NIT';
 }
 case 'ASK_DOC_TYPE': {
-  const code = normalizeDocType(body); // 'CEDULA' | 'NIT' o null
+  const code = normalizeDocType(body);
   if (!code) {
     await sendText(
       from,
-      'Elige el tipo de documento:\n' +
+      'No te entendí. Responde con:\n' +
       '1) Cédula\n' +
-      '2) NIT\n\n' +
-      'Responde *1* o *2*.'
+      '2) NIT'
     );
     return;
   }
+  s = await prisma.onboarding.update({
+    where: { whatsapp_phone: from },
+    data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
+  });
+  await sendText(from, `Perfecto. Escribe tu número de *${docTypeLabel(code)}* (solo números).`);
+  return;
+}
   s = await prisma.onboarding.update({
     where: { whatsapp_phone: from },
     data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
@@ -108,7 +113,13 @@ async function handleOnboarding(from, body) {
         where: { whatsapp_phone: from },
         data: { draft_name: body.trim(), state: 'ASK_DOC_TYPE' }
       });
-      await sendText(from, '¿Tu documento es *Cédula* o *NIT*? (escribe exactamente: *Cédula* o *NIT*)');
+      await sendText(
+    from,
+    'Elige el tipo de documento:\n' +
+    '1) Cédula\n' +
+    '2) NIT\n\n' +
+    'Responde *1* o *2*.'
+  );
       return;
     }
 
@@ -148,15 +159,15 @@ async function handleOnboarding(from, body) {
       return;
     }
 
-    case 'CONFIRM': {
+   case 'CONFIRM': {
   if (lower === 'si' || lower === 'sí') {
     const exists = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
-    const docTypeCode = normalizeDocType(s.draft_doc_type) || s.draft_doc_type; // 'CEDULA' | 'NIT'
+    const docTypeCode = normalizeDocType(s.draft_doc_type) || s.draft_doc_type; // 'CEDULA'|'NIT'
     if (!exists) {
       await prisma.customer.create({
         data: {
           name: s.draft_name,
-          doc_type: docTypeCode,           // ⚠️ ENUM: 'CEDULA' o 'NIT'
+          doc_type: docTypeCode,     // ENUM correcto
           doc_number: s.draft_doc_number,
           billing_email: s.draft_email,
           whatsapp_phone: from,
@@ -164,6 +175,11 @@ async function handleOnboarding(from, body) {
         }
       });
     }
+    await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
+    await sendButtons(from);  // 👈 muestra “Ver tienda” / “Pedir por chat”
+    return;
+  }
+}
     await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
     await sendButtons(from);
     return;
@@ -297,8 +313,7 @@ app.post('/webhook', async (req, res) => {
 if (btnId === 'go_catalog') {
   await sendText(
     from,
-    '🛍️ Abre nuestro *perfil de WhatsApp* y toca **Ver tienda**.\n' +
-    'Ahí verás el catálogo con precios.'
+    '🛍️ Abre nuestro *perfil de WhatsApp* y toca **Ver tienda** para ver el catálogo y precios.'
   );
   return res.sendStatus(200);
 }

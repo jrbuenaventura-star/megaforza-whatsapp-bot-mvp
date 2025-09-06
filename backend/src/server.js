@@ -30,19 +30,47 @@ app.get('/webhook', (req, res) => {
 });
 
 // --------- Utilidades de validación ---------
-function stripAccents(str) {
-  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+function stripAccents(str='') {
+  return String(str).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 function isEmail(s) {
   return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(s.trim());
 }
-function normalizeDocType(txt) {
-  const t = stripAccents((txt || '').trim()).toLowerCase();
-  if (t === 'nit') return 'NIT';
-  if (t === 'cedula') return 'CEDULA';   // <-- SIN tilde y en mayúsculas
+function normalizeDocType(txt = '') {
+  const t = stripAccents(String(txt).trim()).toLowerCase();
+  if (t === '1' || t === 'cedula') return 'CEDULA';
+  if (t === '2' || t === 'nit')     return 'NIT';
   return null;
 }
-
+function docTypeLabel(code) {
+  return code === 'CEDULA' ? 'Cédula' : 'NIT';
+}
+case 'ASK_DOC_TYPE': {
+  const code = normalizeDocType(body); // 'CEDULA' | 'NIT' o null
+  if (!code) {
+    await sendText(
+      from,
+      'Elige el tipo de documento:\n' +
+      '1) Cédula\n' +
+      '2) NIT\n\n' +
+      'Responde *1* o *2*.'
+    );
+    return;
+  }
+  s = await prisma.onboarding.update({
+    where: { whatsapp_phone: from },
+    data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
+  });
+  await sendText(from, `Perfecto. Escribe tu número de *${docTypeLabel(code)}* (solo números).`);
+  return;
+}
+  s = await prisma.onboarding.update({
+    where: { whatsapp_phone: from },
+    data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
+  });
+  await sendText(from, `Perfecto. Escribe tu número de *${docTypeLabel(code)}* (solo números).`);
+  return;
+}
 // --------- Onboarding paso-a-paso ---------
 async function handleOnboarding(from, body) {
   const lower = (body || '').trim().toLowerCase();
@@ -84,20 +112,6 @@ async function handleOnboarding(from, body) {
       return;
     }
 
-    case 'ASK_DOC_TYPE': {
-      const t = normalizeDocType(body);
-      if (!t) {
-        await sendText(from, 'Por favor escribe *Cédula* o *NIT* (solo esos dos).');
-        return;
-      }
-      s = await prisma.onboarding.update({
-        where: { whatsapp_phone: from },
-        data: { draft_doc_type: t, state: 'ASK_DOC_NUMBER' }
-      });
-      await sendText(from, `Perfecto. Escribe tu número de *${t}* (solo números).`);
-      return;
-    }
-
     case 'ASK_DOC_NUMBER': {
       const digits = body.replace(/\D/g, '');
       if (!digits) {
@@ -108,9 +122,15 @@ async function handleOnboarding(from, body) {
         where: { whatsapp_phone: from },
         data: { draft_doc_number: digits, state: 'ASK_EMAIL' }
       });
-      await sendText(from, 'Ahora escribe tu *correo de facturación* (ej: nombre@empresa.com).');
-      return;
-    }
+      await sendText(
+    from,
+    'Elige el tipo de documento:\n' +
+    '1) Cédula\n' +
+    '2) NIT\n\n' +
+    'Responde *1* o *2*.'
+  );
+  return;
+}
 
     case 'ASK_EMAIL': {
       if (!isEmail(body)) {
@@ -123,7 +143,7 @@ async function handleOnboarding(from, body) {
       });
       await sendText(
         from,
-        `Por favor confirma:\n• Nombre: ${s.draft_name}\n• Documento: ${s.draft_doc_type} ${s.draft_doc_number}\n• Correo: ${s.draft_email}\n\nResponde *SI* para guardar o *EDITAR* para cambiar (ej: "editar nombre").`
+        `Por favor confirma:\n• Nombre: ${s.draft_name}\n`• Documento: ${docTypeLabel(s.draft_doc_type)} ${s.draft_doc_number}\n` Correo: ${s.draft_email}\n\nResponde *SI* para guardar o *EDITAR* para cambiar (ej: "editar nombre").`
       );
       return;
     }
@@ -131,11 +151,12 @@ async function handleOnboarding(from, body) {
     case 'CONFIRM': {
       if (lower === 'si' || lower === 'sí') {
         const exists = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+        const docTypeCode = normalizeDocType(s.draft_doc_type) || s.draft_doc_type;
         if (!exists) {
           await prisma.customer.create({
             data: {
               name: s.draft_name,
-              doc_type: s.draft_doc_type,         // "Cédula" | "NIT"
+              doc_type: docTypeCode,         // "Cédula" | "NIT"
               doc_number: s.draft_doc_number,
               billing_email: s.draft_email,
               whatsapp_phone: from,
@@ -173,7 +194,7 @@ async function handleOnboarding(from, body) {
     }
   }
 }
-app.use(express.json());
+
 // --------- Webhook de WhatsApp (POST) ---------
 // --------- Webhook de WhatsApp (POST) ---------
 app.post('/webhook', async (req, res) => {

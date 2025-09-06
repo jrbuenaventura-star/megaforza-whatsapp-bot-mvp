@@ -290,7 +290,27 @@ app.post('/webhook', async (req, res) => {
       );
       return res.sendStatus(200);
     }
+    const btnId =
+  req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.interactive?.button_reply?.id
+  || req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.button?.payload;
 
+if (btnId === 'go_catalog') {
+  await sendText(
+    from,
+    '🛍️ Abre nuestro *perfil de WhatsApp* y toca **Ver tienda**.\n' +
+    'Ahí verás el catálogo con precios.'
+  );
+  return res.sendStatus(200);
+}
+if (btnId === 'start_order') {
+  await sendText(
+    from,
+    '🧾 Escribe tu pedido como:\n' +
+    '`SKU x cantidad; SKU x cantidad`\n' +
+    'Ej.: `LEC-18P x 1200; SUP-GAN x 300`'
+  );
+  return res.sendStatus(200);
+}
     // 7) ¿Envió un pedido tipo "SKU x cantidad"?
     if (/[xX]\s*\d+/.test(body)) {
       const parts = body.split(/[;\n]+/);

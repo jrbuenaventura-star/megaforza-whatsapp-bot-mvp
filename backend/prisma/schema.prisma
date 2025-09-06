@@ -19,7 +19,6 @@ model Customer {
   discounts   CustomerProductDiscount[]
   orders         Order[]
 }
-
 model Product {
   id            String   @id @default(uuid())
   sku           String   @unique

@@ -177,6 +177,7 @@ async function handleOnboarding(from, body) {
 app.use(express.json());
 // --------- Webhook de WhatsApp (POST) ---------
 app.post('/webhook', async (req, res) => {
+  console.log('INBOUND WEBHOOK:', JSON.stringify(req.body)); // 👈 log
   try {
     const change = req.body?.entry?.[0]?.changes?.[0]?.value;
     const msg = change?.messages?.[0];
@@ -285,7 +286,7 @@ app.post('/webhook', async (req, res) => {
     await sendText(from, 'Escribe *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.\nEjemplo de pedido: `LEC-18P x 1200; SUP-GAN x 300`');
     res.sendStatus(200);
   } catch (e) {
-    console.error(e);
+    console.error('WEBHOOK ERROR:', e);
     res.sendStatus(200); // WhatsApp exige 200 siempre
   }
 });

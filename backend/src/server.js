@@ -165,7 +165,36 @@ async function handleOnboarding(from, body) {
           });
         }
         await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
-        await sendText(from, '✅ ¡Registrado! Ya puedes escribir *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.');
+        import fetch from 'node-fetch'; // si no lo tienes ya
+
+async function sendButtons(to) {
+  const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: "🎉 Registro completo. ¿Cómo quieres continuar?" },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: "go_catalog",   title: "Ver tienda" } },
+          { type: "reply", reply: { id: "start_order",  title: "Pedir por chat" } }
+        ]
+      }
+    }
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) console.error("sendButtons error:", r.status, await r.text());
+}
         return;
       }
 
@@ -195,7 +224,6 @@ async function handleOnboarding(from, body) {
   }
 }
 
-// --------- Webhook de WhatsApp (POST) ---------
 // --------- Webhook de WhatsApp (POST) ---------
 app.post('/webhook', async (req, res) => {
   console.log('INBOUND WEBHOOK:', JSON.stringify(req.body));

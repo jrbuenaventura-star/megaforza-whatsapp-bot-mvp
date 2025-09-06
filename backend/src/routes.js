@@ -28,19 +28,30 @@ router.post("/config/capacity", async (req,res)=>{
   res.json(cfg);
 });
 
-router.get("/customers", async (req,res)=>{
-  const q = req.query.q?.toString() || "";
-  const customers = await prisma.customer.findMany({
-    where: {
-      OR: [
-        { name: { contains: q, mode: 'insensitive' } },
-        { whatsapp_phone: { contains: q } },
-        { doc_number: { contains: q } }
-      ]
-    },
-    orderBy: { created_at: 'desc' }
-  });
-  res.json(customers);
+// GET /api/customers
+router.get("/customers", async (req, res) => {
+  try {
+    const q = req.query.q?.toString() || "";
+    const customers = await prisma.customer.findMany({
+      where: {
+        OR: [
+          { name: { contains: q, mode: 'insensitive' } },
+          { whatsapp_phone: { contains: q } },
+          { doc_number: { contains: q } }
+        ]
+      },
+      orderBy: { created_at: 'desc' }
+    });
+    res.json(customers);
+  } catch (e) {
+    console.error("GET /customers error:", e);
+    res.status(500).json({
+      ok: false,
+      route: "/customers",
+      message: String(e?.message || e),
+      code: e?.code || null
+    });
+  }
 });
 router.post("/customers", upload.fields([{ name:'rut' }, { name:'camara' }]), async (req,res)=>{
   const { name, doc_type, doc_number, nit_dv, billing_email, whatsapp_phone, discount_pct } = req.body;

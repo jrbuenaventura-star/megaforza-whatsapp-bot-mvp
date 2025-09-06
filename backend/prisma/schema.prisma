@@ -103,15 +103,14 @@ model TempCart {
   updated_at     DateTime @updatedAt
 }
 model Onboarding {
-  // Usamos el número de WhatsApp como ID único (sin +, en formato 57...)
-  whatsapp_phone  String   @id
-  state           String
-
+  whatsapp_phone   String   @id
+  state            String
   draft_name       String?
   draft_doc_type   String?   // "Cédula" | "NIT"
   draft_doc_number String?
   draft_email      String?
+  created_at       DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime  @default(now()) @db.Timestamptz(6)
 
-  created_at      DateTime @default(now())
-  updated_at      DateTime @updatedAt
+  @@map("Onboarding") // importante si la tabla se creó con mayúscula O
 }

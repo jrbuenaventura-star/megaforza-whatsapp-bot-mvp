@@ -1,15 +1,19 @@
 import CustomersTable from './CustomersTable';
 
 async function getData() {
-  const base = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3000/api';
-  const url = `${base.replace(/\/+$/, '')}/customers`;
-  const res = await fetch(url, { cache: 'no-store' });
+  // Llama al proxy interno (mismo dominio del dashboard)
+  const res = await fetch(`${process.env.NEXT_PUBLIC_VERCEL_URL ? 'https://' + process.env.NEXT_PUBLIC_VERCEL_URL : ''}/api/proxy/customers`, {
+    cache: 'no-store',
+  }).catch(() => null);
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Error ${res.status}: ${text}`);
+  // Fallback por si NEXT_PUBLIC_VERCEL_URL no existe (Vercel lo pone solo en algunos casos)
+  const finalRes = res ?? await fetch('/api/proxy/customers', { cache: 'no-store' });
+
+  if (!finalRes.ok) {
+    const text = await finalRes.text().catch(() => finalRes.statusText);
+    throw new Error(`Error ${finalRes.status}: ${text}`);
   }
-  return res.json();
+  return finalRes.json();
 }
 
 export default async function Page() {

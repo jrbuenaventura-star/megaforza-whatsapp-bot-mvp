@@ -2,7 +2,6 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import bodyParser from 'body-parser';
 
 import { prisma } from './db.js';                // ✅ una sola instancia centralizada
 import { router as api } from './routes.js';
@@ -11,7 +10,7 @@ import { scheduleOrderForItems } from './scheduler.js';
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
 // --------- Health check ---------
 app.get('/api/health', (_req, res) => {
@@ -176,48 +175,73 @@ async function handleOnboarding(from, body) {
 }
 app.use(express.json());
 // --------- Webhook de WhatsApp (POST) ---------
+// --------- Webhook de WhatsApp (POST) ---------
 app.post('/webhook', async (req, res) => {
-  console.log('INBOUND WEBHOOK:', JSON.stringify(req.body)); // 👈 log
+  console.log('INBOUND WEBHOOK:', JSON.stringify(req.body));
   try {
     const change = req.body?.entry?.[0]?.changes?.[0]?.value;
+
+    // 0) WhatsApp manda "statuses" (entregado/leído) SIN mensajes: ignóralos.
+    if (change?.statuses?.length) return res.sendStatus(200);
+
+    // 1) Primer mensaje real
     const msg = change?.messages?.[0];
-    if (!msg) { res.sendStatus(200); return; }
+    if (!msg) return res.sendStatus(200);
 
-    const from = msg.from;
-    const body = msg.text?.body?.trim() ?? '';
+    const from = msg.from;                         // 5731...
+    const body = (msg.text?.body || '').trim();    // texto del cliente
+    const lower = body.toLowerCase();
 
-    // 1) Si no existe cliente, dirigir al onboarding
-    let customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+    // 2) ¿Es cliente?
+    const customer = await prisma.customer.findUnique({
+      where: { whatsapp_phone: from }
+    });
+
+    // 3) ¿Hay sesión de onboarding?
+    let session = await prisma.onboarding.findUnique({
+      where: { whatsapp_phone: from }
+    });
+
+    // 4) Si NO es cliente y NO hay sesión: crea sesión y saluda (intro garantizado)
+    if (!customer && !session) {
+      await prisma.onboarding.create({
+        data: { whatsapp_phone: from, state: 'ASK_NAME' }
+      });
+      await sendText(
+        from,
+        '👋 ¡Hola! Soy el asistente de *Megaforza*.\n' +
+        'Te ayudo a crear tu cuenta en 4 pasos. ¿Cuál es tu *Nombre* (persona o empresa)?'
+      );
+      return res.sendStatus(200);
+    }
+
+    // 5) Si NO es cliente pero SÍ hay sesión → continuar onboarding paso a paso
     if (!customer) {
-      if (body.toLowerCase() === 'registrar') {
-        await prisma.onboarding.upsert({
-          where: { whatsapp_phone: from },
-          update: { state: 'ASK_NAME' },
-          create: { whatsapp_phone: from, state: 'ASK_NAME' }
-        });
-        await sendText(from, '¡Hola! Empecemos. ¿Cuál es tu *Nombre* (persona o empresa)?');
-        res.sendStatus(200);
-        return;
-      }
       await handleOnboarding(from, body);
-      res.sendStatus(200);
-      return;
+      return res.sendStatus(200);
     }
 
-    // 2) Cliente ya registrado: comandos
-    if (['catalogo','catálogo'].includes(body.toLowerCase())) {
-      await sendText(from, 'Te envío el catálogo…');
-      res.sendStatus(200);
-      return;
+    // 6) Cliente ya registrado → comandos conocidos
+    if (lower === 'catalogo' || lower === 'catálogo') {
+      await sendText(
+        from,
+        '📘 Catálogo: https://megaforza-whatsapp-bot-mvp.vercel.app/products\n' +
+        '(Los precios netos aplican tu descuento por cliente al momento de pedir).'
+      );
+      return res.sendStatus(200);
     }
 
-    if (body.toLowerCase() === 'pedir') {
-      await sendText(from, 'Perfecto, dime el producto y cantidad en formato "SKU x cantidad; ..."');
-      res.sendStatus(200);
-      return;
+    if (lower === 'pedir') {
+      await sendText(
+        from,
+        '🛒 Perfecto. Escribe tu pedido como:\n' +
+        '`SKU x cantidad; SKU x cantidad`\n' +
+        'Ej.: `LEC-18P x 1200; SUP-GAN x 300`'
+      );
+      return res.sendStatus(200);
     }
 
-    // 3) Interpretar pedido tipo "SKU x 100; LEC-18P x 1200"
+    // 7) ¿Envió un pedido tipo "SKU x cantidad"?
     if (/[xX]\s*\d+/.test(body)) {
       const parts = body.split(/[;\n]+/);
       const items = [];
@@ -232,15 +256,19 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (items.length) {
+        // capacidad + cálculo de totales (con DESCUENTO por cliente)
         const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
         const sch = await scheduleOrderForItems(items, new Date(), cfg);
-        const prods = await prisma.product.findMany({ where: { id: { in: items.map(i => i.product_id) } } });
+
+        const prods = await prisma.product.findMany({
+          where: { id: { in: items.map(i => i.product_id) } }
+        });
         const map = new Map(prods.map(p => [p.id, p]));
 
         let subtotal = 0, discount_total = 0, total_bags = 0;
+        const disc = Number(customer.discount_pct || 0);
         const orderItemsData = [];
 
-        const disc = Number(customer.discount_pct || 0); // ✅ descuento por cliente
         for (const it of items) {
           const p = map.get(it.product_id);
           const unit = Number(p.price_per_bag || 0);
@@ -274,23 +302,33 @@ app.post('/webhook', async (req, res) => {
 
         await sendText(
           from,
-          `Tu pedido #${order.id.slice(0, 8)} está pre-agendado. Total: $${total.toFixed(2)}. ` +
-          `Envía el soporte de pago para confirmar. Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`
+          `✅ Pedido #${order.id.slice(0, 8)} pre-agendado.\n` +
+          `Bultos: ${total_bags}\n` +
+          `Subtotal: $${subtotal.toFixed(2)}\n` +
+          `Descuento: $${discount_total.toFixed(2)} (${disc}%)\n` +
+          `Total: $${total.toFixed(2)}\n` +
+          `Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}\n` +
+          `Envía el soporte de pago para confirmar.`
         );
-        res.sendStatus(200);
-        return;
+        return res.sendStatus(200);
       }
     }
 
-    // 4) Respuesta por defecto
-    await sendText(from, 'Escribe *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.\nEjemplo de pedido: `LEC-18P x 1200; SUP-GAN x 300`');
-    res.sendStatus(200);
+    // 8) Respuesta por defecto
+    const shortName = customer.name?.split(' ')[0] || 'cliente';
+    await sendText(
+      from,
+      `👋 Hola, *${shortName}*.\n` +
+      `Escribe *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.\n` +
+      `Ej.: \`LEC-18P x 1200; SUP-GAN x 300\``
+    );
+    return res.sendStatus(200);
+
   } catch (e) {
-    console.error('WEBHOOK ERROR:', e);
-    res.sendStatus(200); // WhatsApp exige 200 siempre
+    console.error('WEBHOOK ERROR:', e, JSON.stringify(req.body));
+    return res.sendStatus(200);
   }
 });
-
 // --------- API REST del panel ---------
 app.use('/api', api);
 

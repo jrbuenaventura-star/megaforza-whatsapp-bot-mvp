@@ -1,32 +1,39 @@
 // backend/src/routes.js
 import express from "express";
 import multer from "multer";
+import { Prisma } from "@prisma/client";
 import { prisma } from "./db.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 
 const upload = multer({ dest: "uploads/" });
 export const router = express.Router();
 
-/* Helpers */
+/* ---------------------------- Helpers ---------------------------- */
 function toNum(v, d = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 }
 function normalizeDocType(txt = "") {
-  const t = String(txt).normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+  const t = String(txt)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
   if (t === "cedula" || t === "cédula" || t === "1") return "CEDULA";
   if (t === "nit" || t === "2") return "NIT";
   return null;
 }
 
-/* Raíz del API (para evitar "Cannot GET /api") */
-router.get("/", (req, res) => res.json({ ok: true, name: "Megaforza API" }));
+/* Para mapear ?status= en /orders usando el enum real de Prisma */
+const ORDER_STATUS_ENUM = Object.values(Prisma.OrderStatus);
+const statusMap = new Map(ORDER_STATUS_ENUM.map((s) => [String(s).toLowerCase(), s]));
 
-/* Health */
-router.get("/health", (req, res) => res.json({ ok: true }));
+/* ------------------------ Rutas base / health ------------------------ */
+router.get("/", (_req, res) => res.json({ ok: true, name: "Megaforza API" }));
+router.get("/health", (_req, res) => res.json({ ok: true }));
 
-/* Products */
-router.get("/products", async (req, res) => {
+/* ----------------------------- Products ----------------------------- */
+router.get("/products", async (_req, res) => {
   try {
     const products = await prisma.product.findMany({
       where: { active: true },
@@ -52,8 +59,8 @@ router.patch("/products/:id", async (req, res) => {
   }
 });
 
-/* Capacity Config */
-router.get("/config/capacity", async (req, res) => {
+/* -------------------------- Capacity Config -------------------------- */
+router.get("/config/capacity", async (_req, res) => {
   try {
     const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
     res.json(cfg);
@@ -78,7 +85,7 @@ router.post("/config/capacity", async (req, res) => {
   }
 });
 
-/* Customers */
+/* ------------------------------ Customers ------------------------------ */
 router.get("/customers", async (req, res) => {
   try {
     const q = req.query.q?.toString() || "";
@@ -154,18 +161,12 @@ router.patch("/customers/:id", async (req, res) => {
   }
 });
 
-/* Orders */
+/* -------------------------------- Orders ------------------------------- */
 router.get("/orders", async (req, res) => {
   try {
-    const allowed = [
-      "pending_payment",
-      "paid",
-      "scheduled",
-      "in_production",
-      "delivered",
-    ];
-    const statusParam = req.query.status?.toString();
-    const where = allowed.includes(statusParam) ? { status: statusParam } : {};
+    const statusParam = (req.query.status || "").toString().toLowerCase();
+    const enumValue = statusMap.get(statusParam); // null si no coincide
+    const where = enumValue ? { status: enumValue } : {};
 
     const orders = await prisma.order.findMany({
       where,
@@ -219,7 +220,7 @@ router.post("/orders", async (req, res) => {
     const order = await prisma.order.create({
       data: {
         customer_id,
-        status: "pending_payment",
+        status: Prisma.OrderStatus.PENDING_PAYMENT,
         total_bags,
         subtotal,
         discount_total,
@@ -250,7 +251,7 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
   try {
     const o = await prisma.order.update({
       where: { id: req.params.id },
-      data: { status: "delivered" },
+      data: { status: Prisma.OrderStatus.DELIVERED },
     });
     res.json(o);
   } catch (e) {
@@ -259,27 +260,27 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
   }
 });
 
-/* Reports */
-// GET /api/reports/pendingByCustomer
-router.get("/reports/pendingByCustomer", async (req, res) => {
+/* -------------------------------- Reports ------------------------------ */
+// /api/reports/pendingByCustomer  → bultos pendientes por cliente/producto
+router.get("/reports/pendingByCustomer", async (_req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { status: { not: 'delivered' } },   // ← cambio clave
+      where: { status: { not: Prisma.OrderStatus.DELIVERED } }, // ✅ enum real
       include: { customer: true, items: { include: { product: true } } },
-      orderBy: { created_at: 'asc' }
+      orderBy: { created_at: "asc" },
     });
 
     const rows = [];
     const byCust = new Map();
 
     for (const o of orders) {
-      const cname = o.customer?.name || '—';
+      const cname = o.customer?.name || "—";
       if (!byCust.has(cname)) byCust.set(cname, new Map());
       const m = byCust.get(cname);
 
       for (const it of o.items) {
-        const pname = it.product?.name || '—';
-        const qty   = Number(it.qty_bags || 0);
+        const pname = it.product?.name || "—";
+        const qty = Number(it.qty_bags || 0);
         m.set(pname, (m.get(pname) || 0) + qty);
       }
     }
@@ -297,23 +298,24 @@ router.get("/reports/pendingByCustomer", async (req, res) => {
       ok: false,
       route: "/reports/pendingByCustomer",
       message: String(e?.message || e),
-      code: e?.code || null
+      code: e?.code || null,
     });
   }
 });
-// GET /api/reports/pendingByProduct
-router.get("/reports/pendingByProduct", async (req, res) => {
+
+// /api/reports/pendingByProduct → bultos pendientes por producto
+router.get("/reports/pendingByProduct", async (_req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { NOT: { status: 'delivered' } },
+      where: { status: { not: Prisma.OrderStatus.DELIVERED } }, // ✅ enum real
       include: { items: { include: { product: true } } },
-      orderBy: { created_at: 'asc' }
+      orderBy: { created_at: "asc" },
     });
 
     const map = new Map(); // product -> qty
     for (const o of orders) {
       for (const it of o.items) {
-        const pname = it.product?.name || '—';
+        const pname = it.product?.name || "—";
         const qty = Number(it.qty_bags || 0);
         map.set(pname, (map.get(pname) || 0) + qty);
       }
@@ -327,13 +329,13 @@ router.get("/reports/pendingByProduct", async (req, res) => {
       ok: false,
       route: "/reports/pendingByProduct",
       message: String(e?.message || e),
-      code: e?.code || null
+      code: e?.code || null,
     });
   }
 });
 
-/* Diag DB */
-router.get("/__diag/db", async (req, res) => {
+/* --------------------------------- Diag -------------------------------- */
+router.get("/__diag/db", async (_req, res) => {
   try {
     const one = await prisma.$queryRaw`select 1 as ok`;
     const count = await prisma.customer.count();
@@ -343,42 +345,12 @@ router.get("/__diag/db", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
-// DIAG: ver qué valores reales de status existen en Order
-router.get("/__diag/order-statuses", async (req, res) => {
-  try {
-    // intento con groupBy (Prisma)
-    try {
-      const rows = await prisma.order.groupBy({
-        by: ["status"],
-        _count: { _all: true },
-        orderBy: { status: "asc" }
-      });
-      return res.json({ ok: true, statuses: rows });
-    } catch (_) {
-      // Fallback por si groupBy no está disponible
-      const all = await prisma.order.findMany({ select: { status: true } });
-      const map = new Map();
-      for (const r of all) map.set(r.status, (map.get(r.status) || 0) + 1);
-      const rows = [...map.entries()].sort((a,b)=>a[0].localeCompare(b[0]))
-                    .map(([status, count]) => ({ status, _count: { _all: count }}));
-      return res.json({ ok: true, statuses: rows });
-    }
-  } catch (e) {
-    console.error("DIAG statuses error:", e);
-    res.status(500).json({ ok: false, message: String(e?.message || e) });
-  }
+
+// Enum real y conteo de pedidos (útiles para pruebas)
+router.get("/__diag/order-enum", (_req, res) => {
+  res.json({ ok: true, enum: ORDER_STATUS_ENUM });
 });
-// Dev: ver qué valores reales tiene el enum OrderStatus en tu BD
-router.get("/__diag/order-statuses", async (req, res) => {
-  try {
-    const rows = await prisma.order.groupBy({
-      by: ["status"],
-      _count: { _all: true },
-      orderBy: { status: "asc" }
-    });
-    res.json({ ok: true, statuses: rows });
-  } catch (e) {
-    console.error("DIAG statuses error:", e);
-    res.status(500).json({ ok: false, message: String(e?.message || e) });
-  }
+router.get("/__diag/orders-count", async (_req, res) => {
+  const count = await prisma.order.count();
+  res.json({ ok: true, count });
 });

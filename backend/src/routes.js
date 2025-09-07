@@ -346,11 +346,24 @@ router.get("/__diag/db", async (_req, res) => {
   }
 });
 
-// Enum real y conteo de pedidos (útiles para pruebas)
+// Enum real de Order.status (según el client de Prisma)
 router.get("/__diag/order-enum", (_req, res) => {
-  res.json({ ok: true, enum: ORDER_STATUS_ENUM });
+  try {
+    const enums = Prisma?.OrderStatus ? Object.values(Prisma.OrderStatus) : [];
+    res.json({ ok: true, enum: enums });
+  } catch (e) {
+    console.error("GET /__diag/order-enum", e);
+    res.status(500).json({ ok: false, message: String(e?.message || e) });
+  }
 });
+
+// Conteo de órdenes
 router.get("/__diag/orders-count", async (_req, res) => {
-  const count = await prisma.order.count();
-  res.json({ ok: true, count });
+  try {
+    const count = await prisma.order.count();
+    res.json({ ok: true, count });
+  } catch (e) {
+    console.error("GET /__diag/orders-count", e);
+    res.status(500).json({ ok: false, message: String(e?.message || e) });
+  }
 });

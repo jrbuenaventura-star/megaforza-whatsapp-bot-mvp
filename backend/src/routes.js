@@ -343,3 +343,17 @@ router.get("/__diag/db", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+// Dev: ver qué valores reales tiene el enum OrderStatus en tu BD
+router.get("/__diag/order-statuses", async (req, res) => {
+  try {
+    const rows = await prisma.order.groupBy({
+      by: ["status"],
+      _count: { _all: true },
+      orderBy: { status: "asc" }
+    });
+    res.json({ ok: true, statuses: rows });
+  } catch (e) {
+    console.error("DIAG statuses error:", e);
+    res.status(500).json({ ok: false, message: String(e?.message || e) });
+  }
+});

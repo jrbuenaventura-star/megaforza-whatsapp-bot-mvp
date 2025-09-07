@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { sendText, sendButtons, sendMultiProduct } from './wa.js';
+import { sendText, sendButtons } from './wa.js';
 import { prisma } from './db.js';                // ✅ una sola instancia centralizada
 import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
@@ -44,38 +44,6 @@ function normalizeDocType(txt = '') {
 function docTypeLabel(code) {
   return code === 'CEDULA' ? 'Cédula' : 'NIT';
 }
-case 'ASK_DOC_TYPE': {
-  const code = normalizeDocType(body);
-  if (!code) {
-    await sendText(
-      from,
-      'No te entendí. Responde con:\n' +
-      '1) Cédula\n' +
-      '2) NIT'
-    );
-    return;
-  }
-  s = await prisma.onboarding.update({
-    where: { whatsapp_phone: from },
-    data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
-  });
-  await sendText(from, `Perfecto. Escribe tu número de *${docTypeLabel(code)}* (solo números).`);
-  return;
-}
-  s = await prisma.onboarding.update({
-    where: { whatsapp_phone: from },
-    data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
-  });
-  await sendText(from, `Perfecto. Escribe tu número de *${docTypeLabel(code)}* (solo números).`);
-  return;
-}
-  s = await prisma.onboarding.update({
-    where: { whatsapp_phone: from },
-    data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
-  });
-  await sendText(from, `Perfecto. Escribe tu número de *${docTypeLabel(code)}* (solo números).`);
-  return;
-}
 // --------- Onboarding paso-a-paso ---------
 async function handleOnboarding(from, body) {
   const lower = (body || '').trim().toLowerCase();
@@ -114,12 +82,32 @@ async function handleOnboarding(from, body) {
         data: { draft_name: body.trim(), state: 'ASK_DOC_TYPE' }
       });
       await sendText(
-    from,
-    'Elige el tipo de documento:\n' +
-    '1) Cédula\n' +
-    '2) NIT\n\n' +
-    'Responde *1* o *2*.'
-  );
+        from,
+        'Elige el tipo de documento:\n' +
+        '1) Cédula\n' +
+        '2) NIT\n\n' +
+        'Responde *1* o *2*.'
+      );
+      return;
+    }
+
+    case 'ASK_DOC_TYPE': {
+      const code = normalizeDocType(body);
+      if (!code) {
+        await sendText(
+          from,
+          'Elige el tipo de documento:\n' +
+          '1) Cédula\n' +
+          '2) NIT\n\n' +
+          'Responde *1* o *2*.'
+        );
+        return;
+      }
+      s = await prisma.onboarding.update({
+        where: { whatsapp_phone: from },
+        data: { draft_doc_type: code, state: 'ASK_DOC_NUMBER' }
+      });
+      await sendText(from, `Perfecto. Escribe tu número de *${docTypeLabel(code)}* (solo números).`);
       return;
     }
 
@@ -133,89 +121,49 @@ async function handleOnboarding(from, body) {
         where: { whatsapp_phone: from },
         data: { draft_doc_number: digits, state: 'ASK_EMAIL' }
       });
-      await sendText(
-    from,
-    'Elige el tipo de documento:\n' +
-    '1) Cédula\n' +
-    '2) NIT\n\n' +
-    'Responde *1* o *2*.'
-  );
-  return;
-}
+      await sendText(from, 'Ahora escribe tu *correo de facturación* (ej: nombre@empresa.com).');
+      return;
+    }
 
     case 'ASK_EMAIL': {
       if (!isEmail(body)) {
         await sendText(from, 'El correo no es válido. Prueba con otro (ej: nombre@empresa.com).');
         return;
       }
+      // guardo el correo y paso a confirmar
       s = await prisma.onboarding.update({
         where: { whatsapp_phone: from },
         data: { draft_email: body.trim(), state: 'CONFIRM' }
       });
       await sendText(
         from,
-        `Por favor confirma:\n• Nombre: ${s.draft_name}\n`• Documento: ${docTypeLabel(s.draft_doc_type)} ${s.draft_doc_number}\n` Correo: ${s.draft_email}\n\nResponde *SI* para guardar o *EDITAR* para cambiar (ej: "editar nombre").`
+        `Por favor confirma:\n` +
+        `• Nombre: ${s.draft_name}\n` +
+        `• Documento: ${docTypeLabel(s.draft_doc_type)} ${s.draft_doc_number}\n` +
+        `• Correo: ${s.draft_email}\n\n` +
+        `Responde *SI* para guardar o *EDITAR* para cambiar (ej: "editar nombre").`
       );
       return;
     }
 
-   case 'CONFIRM': {
-  if (lower === 'si' || lower === 'sí') {
-    const exists = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
-    const docTypeCode = normalizeDocType(s.draft_doc_type) || s.draft_doc_type; // 'CEDULA'|'NIT'
-    if (!exists) {
-      await prisma.customer.create({
-        data: {
-          name: s.draft_name,
-          doc_type: docTypeCode,     // ENUM correcto
-          doc_number: s.draft_doc_number,
-          billing_email: s.draft_email,
-          whatsapp_phone: from,
-          discount_pct: 0
+    case 'CONFIRM': {
+      if (lower === 'si' || lower === 'sí') {
+        const exists = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+        const docTypeCode = normalizeDocType(s.draft_doc_type) || s.draft_doc_type; // 'CEDULA' | 'NIT'
+        if (!exists) {
+          await prisma.customer.create({
+            data: {
+              name: s.draft_name,
+              doc_type: docTypeCode,     // ENUM correcto
+              doc_number: s.draft_doc_number,
+              billing_email: s.draft_email,
+              whatsapp_phone: from,
+              discount_pct: 0
+            }
+          });
         }
-      });
-    }
-    await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
-    await sendButtons(from, "🎉 Registro completo. ¿Cómo quieres continuar?");
-    // (opcional) muestra 6–10 SKUs rápidos
-    const top = await prisma.product.findMany({ where:{ active:true }, orderBy:{ name:'asc' }, take:8 });
-    if (top.length) await sendMultiProduct(from, top.map(p => p.sku));
-    return;
-  }
-  ...
-}
-    await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
-    await sendButtons(from);
-    return;
-  }
-async function sendButtons(to) {
-  const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
-  const payload = {
-    messaging_product: "whatsapp",
-    to,
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: "🎉 Registro completo. ¿Cómo quieres continuar?" },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "go_catalog",   title: "Ver tienda" } },
-          { type: "reply", reply: { id: "start_order",  title: "Pedir por chat" } }
-        ]
-      }
-    }
-  };
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!r.ok) console.error("sendButtons error:", r.status, await r.text());
-}
+        await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
+        await sendButtons(from); // ✅ tu wa.js expone sendButtons(to)
         return;
       }
 
@@ -227,7 +175,13 @@ async function sendButtons(to) {
         }
         if (lower.includes('documento')) {
           await prisma.onboarding.update({ where: { whatsapp_phone: from }, data: { state: 'ASK_DOC_TYPE' } });
-          await sendText(from, '¿Tu documento es *Cédula* o *NIT*?');
+          await sendText(
+            from,
+            'Elige el tipo de documento:\n' +
+            '1) Cédula\n' +
+            '2) NIT\n\n' +
+            'Responde *1* o *2*.'
+          );
           return;
         }
         if (lower.includes('correo') || lower.includes('email')) {
@@ -244,7 +198,6 @@ async function sendButtons(to) {
     }
   }
 }
-
 // --------- Webhook de WhatsApp (POST) ---------
 app.post('/webhook', async (req, res) => {
   console.log('INBOUND WEBHOOK:', JSON.stringify(req.body));

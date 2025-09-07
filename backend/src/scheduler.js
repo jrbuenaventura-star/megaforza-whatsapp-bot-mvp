@@ -1,93 +1,111 @@
-import { DateTime } from "luxon";
-import { prisma } from "./db.js";
+// backend/src/scheduler.js
+import { Prisma } from '@prisma/client';
+import { prisma } from './db.js';
 
-function parseTimeToMinutes(t){
-  const [H,M] = t.split(":").map(Number);
-  return (H*60)+M;
+/* Utilidades de fecha */
+function startOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
 }
-function hoursNeeded(bags, bph){ return bags / Math.max(bph,1); }
-
-function isWorkday(dt, workdays){
-  const map = { Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6, Sun:7 };
-  const set = new Set(workdays.split(",").map(w=>map[w.trim()]));
-  return set.has(dt.weekday);
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+function keyDay(d) {
+  return startOfDay(d).toISOString().slice(0, 10); // "YYYY-MM-DD"
+}
+function setHour(d, h) {
+  const base = startOfDay(d);
+  const hour = Number.isFinite(+h) ? +h : 8;
+  base.setHours(hour, 0, 0, 0);
+  return base;
 }
 
-function clampToWorkStart(dt, cfg){
-  const [sh, sm] = cfg.workday_start.split(":").map(Number);
-  const [eh, em] = cfg.workday_end.split(":").map(Number);
-  const start = dt.set({ hour: sh, minute: sm, second:0, millisecond:0 });
-  const end = dt.set({ hour: eh, minute: em, second:0, millisecond:0 });
-  if(dt < start) return start;
-  if(dt >= end){
-    let d = dt.plus({ days:1 }).set({ hour:0, minute:0, second:0, millisecond:0 });
-    while(!isWorkday(d, cfg.workdays)) d = d.plus({ days:1 });
-    return d.set({ hour: sh, minute: sm, second:0, millisecond:0 });
+/**
+ * items: [{ product_id, qty_bags, pelletized }]
+ * now: Date base
+ * cfg: (opcional) objeto CapacityConfig ya leído (evita fetch extra)
+ *
+ * Retorna: { scheduled_at, ready_at, delivery_at }
+ */
+export async function scheduleOrderForItems(items = [], now = new Date(), cfg) {
+  // 1) Totales del pedido
+  let totalBags = 0;
+  let pelletizedBags = 0;
+  for (const it of items) {
+    const qty = Number(it.qty_bags || 0);
+    totalBags += qty;
+    if (it.pelletized) pelletizedBags += qty;
   }
-  return dt;
-}
 
-function addWorkHours(startDt, hours, cfg){
-  let remainingMin = Math.round(hours*60);
-  let dt = startDt;
-  while(remainingMin > 0){
-    if(!isWorkday(dt, cfg.workdays)){
-      dt = dt.plus({ days:1 }).set({ hour:0, minute:0, second:0, millisecond:0 });
-      continue;
-    }
-    dt = clampToWorkStart(dt, cfg);
-    const [eh, em] = cfg.workday_end.split(":").map(Number);
-    const end = dt.set({ hour: eh, minute: em, second:0, millisecond:0 });
-    const avail = end.diff(dt, 'minutes').minutes;
-    if(avail <= 0){
-      dt = dt.plus({ days:1 }).set({ hour:0, minute:0, second:0, millisecond:0 });
-      continue;
-    }
-    if(remainingMin <= avail){
-      dt = dt.plus({ minutes: remainingMin });
-      remainingMin = 0;
-      break;
-    }else{
-      remainingMin -= avail;
-      dt = dt.plus({ days:1 }).set({ hour:0, minute:0, second:0, millisecond:0 });
-    }
-  }
-  return dt;
-}
+  // 2) Cargar capacidad (o defaults seguros)
+  const capacity = cfg || (await prisma.capacityConfig.findUnique({ where: { id: 1 } }));
+  const DAILY_TOTAL = Number(capacity?.daily_capacity_bags ?? 0) || 10000; // tope general
+  const DAILY_PEL = Number(capacity?.daily_pelletized_capacity_bags ?? 0); // 0 = sin tope pelletizado
+  const WORK_START = Number(capacity?.work_start_hour ?? 8);
+  const WORK_END = Number(capacity?.work_end_hour ?? 17);
 
-export async function scheduleOrderForItems(items, now, cfg){
-  const tz = cfg.timezone || "America/Bogota";
-  const nowDT = DateTime.fromJSDate(now, { zone: tz });
-  // compute backlog per line
-  const openOrders = await prisma.order.findMany({
-    where: { status: { in: ['paid','scheduled','in_production'] } },
+  // 3) Estados activos desde el enum real de Prisma
+  const ACTIVE_STATUSES = (() => {
+    const all = Object.values(Prisma.OrderStatus || {});
+    // Fallback (por si no cargara el enum en algún entorno dev)
+    if (!all.length) return ['paid', 'scheduled', 'in_production'];
+    return all.filter((s) => s !== 'pending_payment' && s !== 'delivered');
+  })();
+
+  // 4) Traer órdenes activas próximas (una sola vez)
+  const windowStart = startOfDay(now);
+  const windowEnd = addDays(windowStart, 60); // horizonte de búsqueda
+
+  const existing = await prisma.order.findMany({
+    where: {
+      status: { in: ACTIVE_STATUSES },
+      scheduled_at: { gte: windowStart, lt: windowEnd },
+    },
     include: { items: { include: { product: true } } },
-    orderBy: { created_at: 'asc' }
+    orderBy: { created_at: 'asc' },
   });
 
-  let backlogPelletBags = 0, backlogNonPelletBags = 0;
-  for(const o of openOrders){
-    for(const it of o.items){
-      if(it.product.pelletized) backlogPelletBags += it.qty_bags;
-      else backlogNonPelletBags += it.qty_bags;
+  // 5) Uso por día (total / pelletizado)
+  const usage = new Map(); // key => { total, pel }
+  for (const o of existing) {
+    const k = keyDay(o.scheduled_at ?? o.created_at ?? windowStart);
+    let t = 0;
+    let p = 0;
+    for (const it of o.items) {
+      const qty = Number(it.qty_bags || 0);
+      t += qty;
+      if (it.product?.pelletized) p += qty;
+    }
+    const prev = usage.get(k) || { total: 0, pel: 0 };
+    usage.set(k, { total: prev.total + t, pel: prev.pel + p });
+  }
+
+  // 6) Buscar el primer día que quepa
+  let chosenDay = null;
+  for (let offset = 0; offset < 60; offset++) {
+    const day = addDays(windowStart, offset);
+    const k = keyDay(day);
+    const u = usage.get(k) || { total: 0, pel: 0 };
+
+    const fitsTotal = u.total + totalBags <= DAILY_TOTAL;
+    const fitsPel = DAILY_PEL <= 0 ? true : u.pel + pelletizedBags <= DAILY_PEL;
+
+    if (fitsTotal && fitsPel) {
+      chosenDay = day;
+      // reserva “virtual” (por si llamas varias veces)
+      usage.set(k, { total: u.total + totalBags, pel: u.pel + pelletizedBags });
+      break;
     }
   }
 
-  const bagsPellet = items.filter(i=>i.pelletized).reduce((s,i)=>s+i.qty_bags,0);
-  const bagsNon    = items.filter(i=>!i.pelletized).reduce((s,i)=>s+i.qty_bags,0);
+  // 7) Horarios (mismo día de la agenda)
+  const scheduledDay = chosenDay || addDays(windowStart, 1); // fallback: día siguiente
+  const scheduled_at = setHour(scheduledDay, WORK_START);
+  const ready_at = setHour(scheduledDay, WORK_END);
+  const delivery_at = ready_at; // puedes cambiar a día siguiente si prefieres
 
-  const startPellet = addWorkHours(nowDT, backlogPelletBags / Math.max(cfg.pellet_bph,1), cfg);
-  const startNon    = addWorkHours(nowDT, backlogNonPelletBags / Math.max(cfg.non_pellet_bph,1), cfg);
-
-  const finPellet   = addWorkHours(startPellet, bagsPellet / Math.max(cfg.pellet_bph,1), cfg);
-  const finNon      = addWorkHours(startNon, bagsNon / Math.max(cfg.non_pellet_bph,1), cfg);
-
-  const readyAt = finPellet > finNon ? finPellet : finNon;
-  const deliveryAt = readyAt.plus({ minutes: cfg.dispatch_buffer_min || 60 });
-
-  return {
-    scheduled_at: (startPellet < startNon ? startPellet : startNon).toJSDate(),
-    ready_at: readyAt.toJSDate(),
-    delivery_at: deliveryAt.toJSDate()
-  };
+  return { scheduled_at, ready_at, delivery_at };
 }

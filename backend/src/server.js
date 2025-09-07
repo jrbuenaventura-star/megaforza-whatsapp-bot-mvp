@@ -321,7 +321,99 @@ if (msg.type === 'interactive') {
   }
 }
 /* ──────────────────────────────────────────────────────────────── */
+// 7) Pedido enviado desde el CATÁLOGO de WhatsApp (carrito)
+if (msg.type === 'order' && Array.isArray(msg.order?.product_items) && msg.order.product_items.length) {
+  // 7.1 Tomar SKU (retailer_id) y cantidades del carrito
+  const cartItems = msg.order.product_items.map((it) => ({
+    sku: (it.product_retailer_id || it.retailer_id || '').trim(),
+    qty_bags: Number(it.quantity || 0)
+  })).filter(x => x.sku && x.qty_bags > 0);
 
+  if (!cartItems.length) {
+    await sendText(from, 'No pude leer artículos del carrito. ¿Puedes reenviarlo, por favor?');
+    return res.sendStatus(200);
+  }
+
+  // 7.2 Buscar productos por SKU
+  const skus = cartItems.map(c => c.sku);
+  const prods = await prisma.product.findMany({ where: { sku: { in: skus } } });
+  const mapSku = new Map(prods.map(p => [p.sku, p]));
+
+  // Validar faltantes
+  const faltantes = cartItems.filter(c => !mapSku.get(c.sku)).map(c => c.sku);
+  if (faltantes.length) {
+    await sendText(from, `⚠️ Estos SKU no existen en el sistema: ${faltantes.join(', ')}.\nAvísanos si necesitas ayuda.`);
+    // Seguimos con los que sí existen
+  }
+
+  // 7.3 Preparar ítems para capacidad y orden
+  const enrichedForCapacity = [];
+  const orderItemsData = [];
+  let subtotal = 0, discount_total = 0, total_bags = 0;
+  const disc = Number((customer?.discount_pct) || 0);
+
+  for (const c of cartItems) {
+    const p = mapSku.get(c.sku);
+    if (!p) continue;
+
+    // Para agenda/capacidad
+    enrichedForCapacity.push({ product_id: p.id, qty_bags: c.qty_bags, pelletized: p.pelletized });
+
+    // Totales
+    const unit = Number(p.price_per_bag || 0);
+    total_bags += c.qty_bags;
+    subtotal += c.qty_bags * unit;
+    discount_total += c.qty_bags * unit * disc / 100;
+
+    orderItemsData.push({
+      product_id: p.id,
+      qty_bags: c.qty_bags,
+      unit_price: unit,
+      discount_pct_applied: disc,
+      line_total: c.qty_bags * unit * (1 - disc / 100)
+    });
+  }
+
+  if (!orderItemsData.length) {
+    await sendText(from, 'No pude crear el pedido porque ningún artículo del carrito coincidió con nuestros productos.');
+    return res.sendStatus(200);
+  }
+
+  // 7.4 Agendar producción/entrega
+  const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
+  const sch = await scheduleOrderForItems(enrichedForCapacity, new Date(), cfg);
+
+  const total = subtotal - discount_total;
+
+  // 7.5 Crear la orden
+  const order = await prisma.order.create({
+    data: {
+      customer_id: customer.id,
+      status: 'pending_payment',
+      total_bags,
+      subtotal,
+      discount_total,
+      total,
+      items: { create: orderItemsData },
+      scheduled_at: sch.scheduled_at,
+      ready_at: sch.ready_at
+    }
+  });
+
+  // 7.6 Confirmar al cliente
+  await sendText(
+    from,
+    `✅ Pedido #${order.id.slice(0,8)} recibido desde el catálogo.\n` +
+    `Bultos: ${total_bags}\n` +
+    `Subtotal: $${subtotal.toFixed(2)}\n` +
+    `Descuento: $${discount_total.toFixed(2)} (${disc}%)\n` +
+    `Total a pagar: $${total.toFixed(2)}\n` +
+    `Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}\n\n` +
+    `Por favor envía el soporte de pago para confirmar.`
+  );
+
+  return res.sendStatus(200);
+}
     // 8) Respuesta por defecto
     const shortName = customer.name?.split(' ')[0] || 'cliente';
     await sendText(

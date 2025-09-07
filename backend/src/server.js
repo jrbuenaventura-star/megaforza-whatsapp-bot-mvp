@@ -260,18 +260,6 @@ if (msg.type === 'interactive') {
     // if (top.length) await sendMultiProduct(from, top.map(p => p.sku));
     return res.sendStatus(200);
   }
-
-  if (btnId === 'start_order') {
-    await sendText(
-      from,
-      '🧾 Escribe tu pedido así:\n`SKU x cantidad; SKU x cantidad`\n' +
-      'Ej.: `LEC-18P x 1200; SUP-GAN x 300`'
-    );
-    // (opcional) sugerir 6–8 SKUs
-    // const top = await prisma.product.findMany({ where:{active:true}, orderBy:{name:'asc'}, take:8 });
-    // if (top.length) await sendMultiProduct(from, top.map(p => p.sku));
-    return res.sendStatus(200);
-  }
 }
 /* ──────────────────────────────────────────────────────────────── */
 // 7) Pedido enviado desde el CATÁLOGO de WhatsApp (carrito)

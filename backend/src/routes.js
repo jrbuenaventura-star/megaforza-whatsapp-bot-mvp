@@ -264,14 +264,14 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
 router.get("/reports/pendingByCustomer", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { NOT: { status: 'delivered' } }, // excluye entregados; evita 'in' con enums
+      where: { status: { not: 'delivered' } },   // ← cambio clave
       include: { customer: true, items: { include: { product: true } } },
       orderBy: { created_at: 'asc' }
     });
 
-    // customer -> product -> qty
     const rows = [];
     const byCust = new Map();
+
     for (const o of orders) {
       const cname = o.customer?.name || '—';
       if (!byCust.has(cname)) byCust.set(cname, new Map());
@@ -279,7 +279,7 @@ router.get("/reports/pendingByCustomer", async (req, res) => {
 
       for (const it of o.items) {
         const pname = it.product?.name || '—';
-        const qty = Number(it.qty_bags || 0);
+        const qty   = Number(it.qty_bags || 0);
         m.set(pname, (m.get(pname) || 0) + qty);
       }
     }

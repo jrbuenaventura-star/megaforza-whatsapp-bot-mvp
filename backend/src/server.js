@@ -360,9 +360,10 @@ if (msg.type === 'order' && Array.isArray(msg.order?.product_items) && msg.order
     await sendText(
       from,
       `👋 Hola, *${shortName}*.\n` +
-      `Escribe *CATALOGO* para ver productos o *PEDIR* para hacer un pedido.\n` +
-      `Ej.: \`LEC-18P x 1200; SUP-GAN x 300\``
-    );
+      `🛍️ Para pedir, abre nuestro *perfil de WhatsApp* y toca **Ver tienda**.\n` +
+  `Cuando tengas el carrito listo, pulsa **Enviar al chat**.\n` +
+  `Si necesitas ayuda, escribe *AYUDA*.`
+);
     return res.sendStatus(200);
 
   } catch (e) {

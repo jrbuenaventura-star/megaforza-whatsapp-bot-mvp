@@ -40,22 +40,34 @@ export async function sendText(to, text) {
 }
 
 // Botones: "Ver tienda" / "Pedir por chat"
-export async function sendButtons(to, message = "🎉 Registro completo. ¿Cómo quieres continuar?") {
-  await callGraph({
+export async function sendButtons(to) {
+  const phoneId = process.env.WHATSAPP_PHONE_ID;
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  const payload = {
     messaging_product: "whatsapp",
-    to: normalizeTo(to),
+    to,
     type: "interactive",
     interactive: {
       type: "button",
-      body: { text: message },
+      body: { text: "🎉 Registro completo. Abre el catálogo para hacer tu pedido." },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "go_catalog",  title: "Ver tienda" } },
-          { type: "reply", reply: { id: "start_order", title: "Pedir por chat" } },
-        ],
-      },
+          { type: "reply", reply: { id: "go_catalog", title: "Ver tienda" } }
+        ]
+      }
+    }
+  };
+
+  const r = await fetch(`https://graph.facebook.com/v20.0/${phoneId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
     },
+    body: JSON.stringify(payload)
   });
+  if (!r.ok) console.error("sendButtons error:", r.status, await r.text());
 }
 
 // (Opcional) Lista multiproducto con tus SKUs (retailer_id = SKU en tu catálogo)

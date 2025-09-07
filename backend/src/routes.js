@@ -260,31 +260,75 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
 });
 
 /* Reports */
+// GET /api/reports/pendingByCustomer
 router.get("/reports/pendingByCustomer", async (req, res) => {
   try {
-    // Si tu enum no tiene "paid", déjalo fuera para evitar el error de validación.
-    const pendingStatuses = ["pending_payment", "scheduled", "in_production"];
-
     const orders = await prisma.order.findMany({
-      where: { status: { in: pendingStatuses } },
+      where: { NOT: { status: 'delivered' } }, // excluye entregados; evita 'in' con enums
       include: { customer: true, items: { include: { product: true } } },
-      orderBy: { created_at: "asc" },
+      orderBy: { created_at: 'asc' }
     });
 
-    const report = {};
+    // customer -> product -> qty
+    const rows = [];
+    const byCust = new Map();
     for (const o of orders) {
-      const cust = o.customer?.name || "Sin nombre";
-      if (!report[cust]) report[cust] = {};
+      const cname = o.customer?.name || '—';
+      if (!byCust.has(cname)) byCust.set(cname, new Map());
+      const m = byCust.get(cname);
+
       for (const it of o.items) {
-        const prodName = it.product?.name || it.product?.sku || "Producto";
-        const qty = Number(it.qty_bags) || 0;
-        report[cust][prodName] = (report[cust][prodName] || 0) + qty;
+        const pname = it.product?.name || '—';
+        const qty = Number(it.qty_bags || 0);
+        m.set(pname, (m.get(pname) || 0) + qty);
       }
     }
-    res.json({ ok: true, report });
+
+    for (const [customer, prodMap] of byCust) {
+      for (const [product, qty_bags] of prodMap) {
+        rows.push({ customer, product, qty_bags });
+      }
+    }
+
+    res.json(rows);
   } catch (e) {
     console.error("GET /reports/pendingByCustomer error:", e);
-    res.status(500).json({ ok: false, message: String(e?.message || e) });
+    res.status(500).json({
+      ok: false,
+      route: "/reports/pendingByCustomer",
+      message: String(e?.message || e),
+      code: e?.code || null
+    });
+  }
+});
+// GET /api/reports/pendingByProduct
+router.get("/reports/pendingByProduct", async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      where: { NOT: { status: 'delivered' } },
+      include: { items: { include: { product: true } } },
+      orderBy: { created_at: 'asc' }
+    });
+
+    const map = new Map(); // product -> qty
+    for (const o of orders) {
+      for (const it of o.items) {
+        const pname = it.product?.name || '—';
+        const qty = Number(it.qty_bags || 0);
+        map.set(pname, (map.get(pname) || 0) + qty);
+      }
+    }
+
+    const rows = Array.from(map, ([product, qty_bags]) => ({ product, qty_bags }));
+    res.json(rows);
+  } catch (e) {
+    console.error("GET /reports/pendingByProduct error:", e);
+    res.status(500).json({
+      ok: false,
+      route: "/reports/pendingByProduct",
+      message: String(e?.message || e),
+      code: e?.code || null
+    });
   }
 });
 

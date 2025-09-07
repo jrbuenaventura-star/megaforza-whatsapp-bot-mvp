@@ -157,21 +157,25 @@ router.patch("/customers/:id", async (req, res) => {
 /* Orders */
 router.get("/orders", async (req, res) => {
   try {
-    const status = req.query.status?.toString();
-    const where = status ? { status } : {};
+    const allowed = [
+      "pending_payment",
+      "paid",
+      "scheduled",
+      "in_production",
+      "delivered",
+    ];
+    const statusParam = req.query.status?.toString();
+    const where = allowed.includes(statusParam) ? { status: statusParam } : {};
+
     const orders = await prisma.order.findMany({
       where,
-      include: {
-        customer: true,
-        items: { include: { product: true } },
-      },
-      // Usa id desc para evitar errores si 'created_at' no existe
-      orderBy: { id: "desc" },
+      include: { customer: true, items: { include: { product: true } } },
+      orderBy: { created_at: "desc" },
     });
     res.json(orders);
   } catch (e) {
-    console.error("GET /orders", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("GET /orders error:", e);
+    res.status(500).json({ ok: false, message: String(e?.message || e) });
   }
 });
 
@@ -258,24 +262,29 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
 /* Reports */
 router.get("/reports/pendingByCustomer", async (req, res) => {
   try {
+    // Si tu enum no tiene "paid", déjalo fuera para evitar el error de validación.
+    const pendingStatuses = ["pending_payment", "scheduled", "in_production"];
+
     const orders = await prisma.order.findMany({
-      where: { status: { in: ["pending_payment", "paid", "scheduled", "in_production"] } },
+      where: { status: { in: pendingStatuses } },
       include: { customer: true, items: { include: { product: true } } },
-      orderBy: { id: "asc" },
+      orderBy: { created_at: "asc" },
     });
+
     const report = {};
     for (const o of orders) {
-      const cust = o.customer.name;
+      const cust = o.customer?.name || "Sin nombre";
       if (!report[cust]) report[cust] = {};
       for (const it of o.items) {
-        const prod = it.product.name;
-        report[cust][prod] = (report[cust][prod] || 0) + it.qty_bags;
+        const prodName = it.product?.name || it.product?.sku || "Producto";
+        const qty = Number(it.qty_bags) || 0;
+        report[cust][prodName] = (report[cust][prodName] || 0) + qty;
       }
     }
-    res.json(report);
+    res.json({ ok: true, report });
   } catch (e) {
-    console.error("GET /reports/pendingByCustomer", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("GET /reports/pendingByCustomer error:", e);
+    res.status(500).json({ ok: false, message: String(e?.message || e) });
   }
 });
 

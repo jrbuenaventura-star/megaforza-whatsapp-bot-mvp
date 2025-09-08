@@ -7,6 +7,13 @@ import { prisma } from './db.js';
 import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
 
+// ─── Admin (número de WhatsApp que recibirá alertas) ──────────────────────────
+const ADMIN_WA = process.env.ADMIN_WA?.replace(/[^\d]/g, '') || null;
+function notifyAdmin(text) {
+  if (!ADMIN_WA) return;
+  return sendText(ADMIN_WA, text);
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -219,7 +226,32 @@ app.post('/webhook', async (req, res) => {
     const from  = msg.from;                         // 5731...
     const body  = (msg.text?.body || '').trim();    // texto si es type=text
     const lower = body.toLowerCase();
+// Datos útiles para notificar al admin
+const channel = change?.metadata?.display_phone_number || '(desconocido)';
+const contactName = change?.contacts?.[0]?.profile?.name || '';
 
+    // Si el admin escribe "@<numero> <mensaje>", reenviamos al cliente indicado
+if (ADMIN_WA && from === ADMIN_WA && body.startsWith('@')) {
+  const m = body.match(/^@(\d{10,15})\s+([\s\S]+)/);
+  if (!m) {
+    await sendText(ADMIN_WA, 'Formato: @5730XXXXXXXX tu mensaje');
+    return res.sendStatus(200);
+  }
+  const dest = m[1];
+  const text = m[2];
+  await sendText(dest, text);
+  await sendText(ADMIN_WA, `✅ Reenviado a ${dest}`);
+  return res.sendStatus(200);
+}
+    // Notifica al admin los mensajes de texto entrantes (evita duplicar los de 'order')
+if (ADMIN_WA && msg.type === 'text') {
+  await notifyAdmin(
+    `📩 Mensaje entrante\n` +
+    `Canal: ${channel}\n` +
+    `De: ${contactName ? `${contactName} ` : ''}(${from})\n` +
+    `Texto: ${body}`
+  );
+}
     /* ───────────────────────────
        🔔 FORWARD AL ADMIN AQUÍ
        ─────────────────────────── */
@@ -311,7 +343,8 @@ app.post('/webhook', async (req, res) => {
       const skus = cartItems.map(c => c.sku);
       const prods = await prisma.product.findMany({ where: { sku: { in: skus } } });
       const mapSku = new Map(prods.map(p => [p.sku, p]));
-
+// Mapa por ID para rotular ítems en el resumen al admin
+      const mapId = new Map(prods.map(p => [p.id, p]));
       // Validar faltantes
       const faltantes = cartItems.filter(c => !mapSku.get(c.sku)).map(c => c.sku);
       if (faltantes.length) {
@@ -384,7 +417,27 @@ app.post('/webhook', async (req, res) => {
         `Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}\n\n` +
         `Por favor envía el soporte de pago para confirmar.`
       );
+// Notifica al admin el pedido recibido
+if (ADMIN_WA) {
+  const adminLines = orderItemsData.map(it => {
+    const p = mapId.get(it.product_id);
+    const label = `${p?.sku || ''} ${p?.name || ''}`.trim();
+    return `• ${label} x ${it.qty_bags}`;
+  }).join('\n');
 
+  await notifyAdmin(
+    `🧾 Pedido nuevo (catálogo)\n` +
+    `Canal: ${channel}\n` +
+    `Cliente: ${customer.name || ''} (${from})\n` +
+    `Items:\n${adminLines}\n` +
+    `Bultos: ${total_bags}\n` +
+    `Subtotal: $${subtotal.toFixed(2)}\n` +
+    `Desc: $${discount_total.toFixed(2)} (${disc}%)\n` +
+    `Total: $${total.toFixed(2)}\n` +
+    `Entrega: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}\n` +
+    `Pedido ID: ${order.id}`
+  );
+}
       return res.sendStatus(200);
     }
 

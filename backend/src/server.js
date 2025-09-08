@@ -3,13 +3,16 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { sendText, sendButtons } from './wa.js';
-import { prisma } from './db.js';                // ✅ una sola instancia centralizada
+import { prisma } from './db.js';
 import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ⚙️ Admin para monitoreo (sin "+")
+const ADMIN_WA = (process.env.ADMIN_WA || '').replace(/[^\d]/g, '');
 
 // --------- Health check ---------
 app.get('/api/health', (_req, res) => {
@@ -44,6 +47,7 @@ function normalizeDocType(txt = '') {
 function docTypeLabel(code) {
   return code === 'CEDULA' ? 'Cédula' : 'NIT';
 }
+
 // --------- Onboarding paso-a-paso ---------
 async function handleOnboarding(from, body) {
   const lower = (body || '').trim().toLowerCase();
@@ -163,7 +167,7 @@ async function handleOnboarding(from, body) {
           });
         }
         await prisma.onboarding.delete({ where: { whatsapp_phone: from } }).catch(() => {});
-        await sendButtons(from); // ✅ tu wa.js expone sendButtons(to)
+        await sendButtons(from); // muestra botones "Ver tienda" / "Pedir por chat" (si lo mantienes)
         return;
       }
 
@@ -198,6 +202,7 @@ async function handleOnboarding(from, body) {
     }
   }
 }
+
 // --------- Webhook de WhatsApp (POST) ---------
 app.post('/webhook', async (req, res) => {
   console.log('INBOUND WEBHOOK:', JSON.stringify(req.body));
@@ -211,9 +216,36 @@ app.post('/webhook', async (req, res) => {
     const msg = change?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
-    const from = msg.from;                         // 5731...
-    const body = (msg.text?.body || '').trim();    // texto del cliente
+    const from  = msg.from;                         // 5731...
+    const body  = (msg.text?.body || '').trim();    // texto si es type=text
     const lower = body.toLowerCase();
+
+    /* ───────────────────────────
+       🔔 FORWARD AL ADMIN AQUÍ
+       ─────────────────────────── */
+    if (ADMIN_WA && from !== ADMIN_WA) {
+      const contactName = change?.contacts?.[0]?.profile?.name;
+      let summary = '';
+      if (msg.type === 'text') {
+        summary = body || '(sin texto)';
+      } else if (msg.type === 'order') {
+        const items = (msg.order?.product_items || [])
+          .map(it => `${it.product_retailer_id || it.retailer_id} x ${it.quantity}`)
+          .join('; ');
+        summary = `🛒 Pedido desde catálogo: ${items || '(vacío)'}`;
+      } else if (msg.type === 'interactive') {
+        const id = msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '(sin id)';
+        summary = `🔘 Respuesta interactiva: ${id} • Texto: ${body || '(sin texto)'}`;
+      } else {
+        summary = `Tipo: ${msg.type || 'desconocido'} • Texto: ${body || '(sin texto)'}`;
+      }
+
+      await sendText(
+        ADMIN_WA,
+        `📥 Nuevo mensaje\nDe: ${contactName ? `${contactName} ` : ''}(${from})\n${summary}`
+      );
+    }
+    /* ─────────────────────────── */
 
     // 2) ¿Es cliente?
     const customer = await prisma.customer.findUnique({
@@ -225,7 +257,7 @@ app.post('/webhook', async (req, res) => {
       where: { whatsapp_phone: from }
     });
 
-    // 4) Si NO es cliente y NO hay sesión: crea sesión y saluda (intro garantizado)
+    // 4) Si NO es cliente y NO hay sesión: crea sesión y saluda
     if (!customer && !session) {
       await prisma.onboarding.create({
         data: { whatsapp_phone: from, state: 'ASK_NAME' }
@@ -238,132 +270,133 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 5) Si NO es cliente pero SÍ hay sesión → continuar onboarding paso a paso
+    // 5) Si NO es cliente pero SÍ hay sesión → continuar onboarding
     if (!customer) {
       await handleOnboarding(from, body);
       return res.sendStatus(200);
     }
-if (msg.type === 'interactive') {
-  const btnId =
-    msg.interactive?.button_reply?.id   // botones "reply"
-    || msg.interactive?.list_reply?.id   // (por si usas listas)
-    || msg.button?.payload;              // fallback
 
-  if (btnId === 'go_catalog') {
-    await sendText(
-      from,
-      '🛍️ Abre nuestro *perfil de WhatsApp* y toca **Ver tienda**. ' +
-      'También puedes enviarme el carrito o escribir el pedido por chat.'
-    );
-    // (opcional) enviar una lista corta de productos
-    // const top = await prisma.product.findMany({ where:{active:true}, orderBy:{name:'asc'}, take:8 });
-    // if (top.length) await sendMultiProduct(from, top.map(p => p.sku));
-    return res.sendStatus(200);
-  }
-}
-/* ──────────────────────────────────────────────────────────────── */
-// 7) Pedido enviado desde el CATÁLOGO de WhatsApp (carrito)
-if (msg.type === 'order' && Array.isArray(msg.order?.product_items) && msg.order.product_items.length) {
-  // 7.1 Tomar SKU (retailer_id) y cantidades del carrito
-  const cartItems = msg.order.product_items.map((it) => ({
-    sku: (it.product_retailer_id || it.retailer_id || '').trim(),
-    qty_bags: Number(it.quantity || 0)
-  })).filter(x => x.sku && x.qty_bags > 0);
+    // 6) Botones interactivos (si los usas)
+    if (msg.type === 'interactive') {
+      const btnId =
+        msg.interactive?.button_reply?.id   // botones "reply"
+        || msg.interactive?.list_reply?.id  // listas, si las hubiera
+        || msg.button?.payload;             // fallback
 
-  if (!cartItems.length) {
-    await sendText(from, 'No pude leer artículos del carrito. ¿Puedes reenviarlo, por favor?');
-    return res.sendStatus(200);
-  }
-
-  // 7.2 Buscar productos por SKU
-  const skus = cartItems.map(c => c.sku);
-  const prods = await prisma.product.findMany({ where: { sku: { in: skus } } });
-  const mapSku = new Map(prods.map(p => [p.sku, p]));
-
-  // Validar faltantes
-  const faltantes = cartItems.filter(c => !mapSku.get(c.sku)).map(c => c.sku);
-  if (faltantes.length) {
-    await sendText(from, `⚠️ Estos SKU no existen en el sistema: ${faltantes.join(', ')}.\nAvísanos si necesitas ayuda.`);
-    // Seguimos con los que sí existen
-  }
-
-  // 7.3 Preparar ítems para capacidad y orden
-  const enrichedForCapacity = [];
-  const orderItemsData = [];
-  let subtotal = 0, discount_total = 0, total_bags = 0;
-  const disc = Number((customer?.discount_pct) || 0);
-
-  for (const c of cartItems) {
-    const p = mapSku.get(c.sku);
-    if (!p) continue;
-
-    // Para agenda/capacidad
-    enrichedForCapacity.push({ product_id: p.id, qty_bags: c.qty_bags, pelletized: p.pelletized });
-
-    // Totales
-    const unit = Number(p.price_per_bag || 0);
-    total_bags += c.qty_bags;
-    subtotal += c.qty_bags * unit;
-    discount_total += c.qty_bags * unit * disc / 100;
-
-    orderItemsData.push({
-      product_id: p.id,
-      qty_bags: c.qty_bags,
-      unit_price: unit,
-      discount_pct_applied: disc,
-      line_total: c.qty_bags * unit * (1 - disc / 100)
-    });
-  }
-
-  if (!orderItemsData.length) {
-    await sendText(from, 'No pude crear el pedido porque ningún artículo del carrito coincidió con nuestros productos.');
-    return res.sendStatus(200);
-  }
-
-  // 7.4 Agendar producción/entrega
-  const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
-  const sch = await scheduleOrderForItems(enrichedForCapacity, new Date(), cfg);
-
-  const total = subtotal - discount_total;
-
-  // 7.5 Crear la orden
-  const order = await prisma.order.create({
-    data: {
-      customer_id: customer.id,
-      status: 'pending_payment',
-      total_bags,
-      subtotal,
-      discount_total,
-      total,
-      items: { create: orderItemsData },
-      scheduled_at: sch.scheduled_at,
-      ready_at: sch.ready_at
+      if (btnId === 'go_catalog') {
+        await sendText(
+          from,
+          '🛍️ Abre nuestro *perfil de WhatsApp* y toca **Ver tienda**. ' +
+          'Cuando tengas el carrito listo, pulsa **Enviar al chat**.'
+        );
+        return res.sendStatus(200);
+      }
     }
-  });
 
-  // 7.6 Confirmar al cliente
-  await sendText(
-    from,
-    `✅ Pedido #${order.id.slice(0,8)} recibido desde el catálogo.\n` +
-    `Bultos: ${total_bags}\n` +
-    `Subtotal: $${subtotal.toFixed(2)}\n` +
-    `Descuento: $${discount_total.toFixed(2)} (${disc}%)\n` +
-    `Total a pagar: $${total.toFixed(2)}\n` +
-    `Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}\n\n` +
-    `Por favor envía el soporte de pago para confirmar.`
-  );
+    /* ──────────────────────────────────────────────────────────────── */
+    // 7) Pedido enviado desde el CATÁLOGO de WhatsApp (carrito)
+    if (msg.type === 'order' && Array.isArray(msg.order?.product_items) && msg.order.product_items.length) {
+      // 7.1 Tomar SKU (retailer_id) y cantidades del carrito
+      const cartItems = msg.order.product_items.map((it) => ({
+        sku: (it.product_retailer_id || it.retailer_id || '').trim(),
+        qty_bags: Number(it.quantity || 0)
+      })).filter(x => x.sku && x.qty_bags > 0);
 
-  return res.sendStatus(200);
-}
+      if (!cartItems.length) {
+        await sendText(from, 'No pude leer artículos del carrito. ¿Puedes reenviarlo, por favor?');
+        return res.sendStatus(200);
+      }
+
+      // 7.2 Buscar productos por SKU
+      const skus = cartItems.map(c => c.sku);
+      const prods = await prisma.product.findMany({ where: { sku: { in: skus } } });
+      const mapSku = new Map(prods.map(p => [p.sku, p]));
+
+      // Validar faltantes
+      const faltantes = cartItems.filter(c => !mapSku.get(c.sku)).map(c => c.sku);
+      if (faltantes.length) {
+        await sendText(from, `⚠️ Estos SKU no existen en el sistema: ${faltantes.join(', ')}.\nAvísanos si necesitas ayuda.`);
+        // Seguimos con los que sí existen
+      }
+
+      // 7.3 Preparar ítems para capacidad y orden
+      const enrichedForCapacity = [];
+      const orderItemsData = [];
+      let subtotal = 0, discount_total = 0, total_bags = 0;
+      const disc = Number((customer?.discount_pct) || 0);
+
+      for (const c of cartItems) {
+        const p = mapSku.get(c.sku);
+        if (!p) continue;
+
+        // Para agenda/capacidad
+        enrichedForCapacity.push({ product_id: p.id, qty_bags: c.qty_bags, pelletized: p.pelletized });
+
+        // Totales
+        const unit = Number(p.price_per_bag || 0);
+        total_bags += c.qty_bags;
+        subtotal += c.qty_bags * unit;
+        discount_total += c.qty_bags * unit * disc / 100;
+
+        orderItemsData.push({
+          product_id: p.id,
+          qty_bags: c.qty_bags,
+          unit_price: unit,
+          discount_pct_applied: disc,
+          line_total: c.qty_bags * unit * (1 - disc / 100)
+        });
+      }
+
+      if (!orderItemsData.length) {
+        await sendText(from, 'No pude crear el pedido porque ningún artículo del carrito coincidió con nuestros productos.');
+        return res.sendStatus(200);
+      }
+
+      // 7.4 Agendar producción/entrega
+      const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
+      const sch = await scheduleOrderForItems(enrichedForCapacity, new Date(), cfg);
+
+      const total = subtotal - discount_total;
+
+      // 7.5 Crear la orden
+      const order = await prisma.order.create({
+        data: {
+          customer_id: customer.id,
+          status: 'pending_payment',
+          total_bags,
+          subtotal,
+          discount_total,
+          total,
+          items: { create: orderItemsData },
+          scheduled_at: sch.scheduled_at,
+          ready_at: sch.ready_at
+        }
+      });
+
+      // 7.6 Confirmar al cliente
+      await sendText(
+        from,
+        `✅ Pedido #${order.id.slice(0,8)} recibido desde el catálogo.\n` +
+        `Bultos: ${total_bags}\n` +
+        `Subtotal: $${subtotal.toFixed(2)}\n` +
+        `Descuento: $${discount_total.toFixed(2)} (${disc}%)\n` +
+        `Total a pagar: $${total.toFixed(2)}\n` +
+        `Entrega estimada: ${sch.delivery_at.toLocaleString('es-CO', { timeZone: 'America/Bogota' })}\n\n` +
+        `Por favor envía el soporte de pago para confirmar.`
+      );
+
+      return res.sendStatus(200);
+    }
+
     // 8) Respuesta por defecto
     const shortName = customer.name?.split(' ')[0] || 'cliente';
     await sendText(
       from,
       `👋 Hola, *${shortName}*.\n` +
       `🛍️ Para pedir, abre nuestro *perfil de WhatsApp* y toca **Ver tienda**.\n` +
-  `Cuando tengas el carrito listo, pulsa **Enviar al chat**.\n` +
-  `Si necesitas ayuda, escribe *AYUDA*.`
-);
+      `Cuando tengas el carrito listo, pulsa **Enviar al chat**.\n` +
+      `Si necesitas ayuda, escribe *AYUDA*.`
+    );
     return res.sendStatus(200);
 
   } catch (e) {
@@ -371,6 +404,7 @@ if (msg.type === 'order' && Array.isArray(msg.order?.product_items) && msg.order
     return res.sendStatus(200);
   }
 });
+
 // --------- API REST del panel ---------
 app.use('/api', api);
 
@@ -378,4 +412,4 @@ app.use('/api', api);
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend running on http://localhost:${PORT}`);
-});   
+});

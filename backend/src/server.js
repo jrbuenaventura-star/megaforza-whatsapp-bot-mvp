@@ -6,6 +6,7 @@ import { sendText, sendButtons } from './wa.js';
 import { prisma } from './db.js';
 import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
+import { OrderStatus } from '@prisma/client';
 
 // ─── Admin (número de WhatsApp que recibirá alertas) ──────────────────────────
 const ADMIN_WA = (process.env.ADMIN_WA || '').replace(/[^\d]/g, '') || null;
@@ -392,7 +393,7 @@ if (ADMIN_WA && msg.type === 'text') {
       const order = await prisma.order.create({
         data: {
           customer_id: customer.id,
-          status: 'pending_payment',
+          status: OrderStatus.PENDING_PAYMENT,
           total_bags,
           subtotal,
           discount_total,

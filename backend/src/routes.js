@@ -4,6 +4,7 @@ import multer from "multer";
 import { Prisma } from "@prisma/client";      // 👈 importa Prisma para leer enums
 import { prisma } from "./db.js";
 import { scheduleOrderForItems } from "./scheduler.js";
+import { OrderStatus } from '@prisma/client';
 
 const upload = multer({ dest: "uploads/" });
 export const router = express.Router();
@@ -278,10 +279,18 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
 router.get("/reports/pendingByCustomer", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      // 👇 sin filtro por status (evita romper por enum)
+      where: {
+        status: { in: [OrderStatus.PAID, OrderStatus.SCHEDULED, OrderStatus.IN_PRODUCTION] },
+      },
       include: { customer: true, items: { include: { product: true } } },
-      orderBy: { created_at: "asc" },
+      orderBy: { created_at: 'asc' },
     });
+    res.json(orders);
+  } catch (e) {
+    console.error('GET /reports/pendingByCustomer error:', e);
+    res.sendStatus(500);
+  }
+});
 
     // Excluye entregados en memoria (case-insensitive)
     const isDelivered = (s) => String(s || "").toLowerCase() === "delivered";

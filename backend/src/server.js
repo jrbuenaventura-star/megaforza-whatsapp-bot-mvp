@@ -6,7 +6,7 @@ import { sendText, sendButtons } from './wa.js';
 import { prisma } from './db.js';
 import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
-import { Prisma, OrderStatus } from '@prisma/client'; // 👈 agrega Prisma también
+import { Prisma } from '@prisma/client'; 
 
 // ── Mapeo string → enum Prisma ────────────────────────────────────────────────
 const StatusFromStr = Object.freeze({
@@ -19,7 +19,7 @@ const StatusFromStr = Object.freeze({
 // Helper opcional para sanitizar:
 const asOrderStatus = (s) => StatusFromStr[String(s).toLowerCase()] ?? OrderStatus.PENDING_PAYMENT;
 
-const order = await prisma.order.create({
+
 
 // Logs de arranque
 console.log('[BOOT] OrderStatus (named):', Object.values(OrderStatus));
@@ -408,20 +408,19 @@ if (ADMIN_WA && msg.type === 'text') {
       const total = subtotal - discount_total;
 
       // 7.5 Crear la orden
-      const orderData = {
+const orderData = {
   customer_id: customer.id,
-  // Si por alguna razón OrderStatus no está cargado, usa el string como fallback
-  status: OrderStatus?.PENDING_PAYMENT ?? 'PENDING_PAYMENT',
+  status: Prisma.OrderStatus.PENDING_PAYMENT, // ← sin fallback a string
   total_bags,
   items: { create: orderItemsData },
   scheduled_at: sch.scheduled_at,
   ready_at: sch.ready_at,
 };
 
-console.log('[ORDER CREATE keys]', Object.keys(orderData), 'status=', orderData.status);
+console.log('[ORDER CREATE] status =', orderData.status);
 
 const order = await prisma.order.create({ data: orderData });
-
+      
       // 7.6 Confirmar al cliente
       await sendText(
         from,

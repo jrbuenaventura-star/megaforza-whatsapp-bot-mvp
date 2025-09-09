@@ -18,8 +18,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ⚙️ Admin para monitoreo (sin "+")
-const ADMIN_WA = (process.env.ADMIN_WA || '').replace(/[^\d]/g, '');
 
 // --------- Health check ---------
 app.get('/api/health', (_req, res) => {

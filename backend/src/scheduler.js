@@ -1,5 +1,6 @@
 // backend/src/scheduler.js
 import { prisma } from "./db.js";
+import { OrderStatus } from '@prisma/client';
 
 /* ===================== helpers de fechas ===================== */
 function ymdPartsInTZ(date, tz) {
@@ -45,10 +46,16 @@ export async function scheduleOrderForItems(enrichedItems, now = new Date(), raw
 
   // 2) Trae órdenes ya agendadas en esa ventana (¡sin filtro por status!)
   const existing = await prisma.order.findMany({
-    where: { scheduled_at: { gte: start, lt: end } },
-    include: { items: { include: { product: true } } },
-    orderBy: { created_at: "asc" },
-  });
+    where: {
+    status: { in: [OrderStatus.PAID, OrderStatus.SCHEDULED, OrderStatus.IN_PRODUCTION] },
+    scheduled_at: {
+      gte: new Date('2025-09-09T05:00:00.000Z'),
+      lt:  new Date('2025-11-08T05:00:00.000Z'),
+    },
+  },
+  include: { items: { include: { product: true } } },
+  orderBy: { created_at: 'asc' },
+});
 
   // 3) Arma carga por día
   const capacityMap = new Map(); // key -> { pelletized, normal }

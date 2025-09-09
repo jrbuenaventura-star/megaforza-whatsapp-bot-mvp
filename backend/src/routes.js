@@ -274,23 +274,24 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
 });
 
 /* ---------------------------- Reports -------------------------- */
-// /api/reports/pendingByCustomer
-router.get("/reports/pendingByCustomer", async (_req, res) => {
+// GET /api/reports/pendingByCustomer
+router.get("/reports/pendingByCustomer", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { status: { in: ORDER_STATUS_ACTIVE } }, // 👈 solo activos
+      // 👇 sin filtro por status (evita romper por enum)
       include: { customer: true, items: { include: { product: true } } },
       orderBy: { created_at: "asc" },
     });
 
-    const rows = [];
-    const byCust = new Map();
+    // Excluye entregados en memoria (case-insensitive)
+    const isDelivered = (s) => String(s || "").toLowerCase() === "delivered";
+    const working = orders.filter(o => !isDelivered(o.status));
 
-    for (const o of orders) {
+    const byCust = new Map(); // customer -> (product -> qty)
+    for (const o of working) {
       const cname = o.customer?.name || "—";
       if (!byCust.has(cname)) byCust.set(cname, new Map());
       const m = byCust.get(cname);
-
       for (const it of o.items) {
         const pname = it.product?.name || "—";
         const qty = Number(it.qty_bags || 0);
@@ -298,55 +299,43 @@ router.get("/reports/pendingByCustomer", async (_req, res) => {
       }
     }
 
+    const rows = [];
     for (const [customer, prodMap] of byCust) {
-      for (const [product, qty_bags] of prodMap) {
-        rows.push({ customer, product, qty_bags });
-      }
+      for (const [product, qty_bags] of prodMap) rows.push({ customer, product, qty_bags });
     }
-
     res.json(rows);
   } catch (e) {
     console.error("GET /reports/pendingByCustomer error:", e);
-    res.status(500).json({
-      ok: false,
-      route: "/reports/pendingByCustomer",
-      message: String(e?.message || e),
-      code: e?.code || null,
-    });
+    res.status(500).json({ ok: false, route: "/reports/pendingByCustomer", message: String(e?.message || e), code: e?.code || null });
   }
 });
 
-// /api/reports/pendingByProduct
-router.get("/reports/pendingByProduct", async (_req, res) => {
+// GET /api/reports/pendingByProduct
+router.get("/reports/pendingByProduct", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { status: { in: ORDER_STATUS_ACTIVE } }, // 👈 solo activos
+      // 👇 sin filtro por status
       include: { items: { include: { product: true } } },
       orderBy: { created_at: "asc" },
     });
 
+    const isDelivered = (s) => String(s || "").toLowerCase() === "delivered";
+    const working = orders.filter(o => !isDelivered(o.status));
+
     const map = new Map(); // product -> qty
-    for (const o of orders) {
+    for (const o of working) {
       for (const it of o.items) {
         const pname = it.product?.name || "—";
         const qty = Number(it.qty_bags || 0);
         map.set(pname, (map.get(pname) || 0) + qty);
       }
     }
-
-    const rows = Array.from(map, ([product, qty_bags]) => ({ product, qty_bags }));
-    res.json(rows);
+    res.json(Array.from(map, ([product, qty_bags]) => ({ product, qty_bags })));
   } catch (e) {
     console.error("GET /reports/pendingByProduct error:", e);
-    res.status(500).json({
-      ok: false,
-      route: "/reports/pendingByProduct",
-      message: String(e?.message || e),
-      code: e?.code || null,
-    });
+    res.status(500).json({ ok: false, route: "/reports/pendingByProduct", message: String(e?.message || e), code: e?.code || null });
   }
 });
-
 /* ---------------------------- Diag ----------------------------- */
 router.get("/__diag/db", async (_req, res) => {
   try {

@@ -1,4 +1,3 @@
-// backend/src/server.js
 import express from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
@@ -10,7 +9,6 @@ import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
 dotenv.config();
-
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
@@ -46,19 +44,12 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Status seguro (soporta enum en MAYÚSCULAS, minúsculas o string fallback)
+    // Status seguro (enum MAYÚSCULAS, minúsculas o string fallback)
     const statusEnum = Prisma?.OrderStatus ?? OrderStatus ?? {};
     const SAFE_STATUS =
-      statusEnum.PENDING_PAYMENT ??   // enum con MAYÚSCULAS
-      statusEnum.pending_payment ??   // enum con minúsculas (si vino de introspección)
-      "pending_payment";              // string fallback compatible
-
-    const fmtCOP = (n) =>
-      Number(n).toLocaleString("es-CO", {
-        style: "currency",
-        currency: "COP",
-        maximumFractionDigits: 0,
-      });
+      statusEnum.PENDING_PAYMENT ?? // enum MAYÚSCULAS
+      statusEnum.pending_payment ?? // enum minúsculas (si vino de introspección)
+      "pending_payment";            // string fallback compatible
 
     // ───────────── Pedidos desde CATÁLOGO ─────────────
     if (msg?.type === "order") {
@@ -96,11 +87,11 @@ app.post("/webhook", async (req, res) => {
           pelletized: !!p.pelletized,
         });
         orderItemsData.push({
-          product_id: p.id,
-          qty_bags: qty,
-          unit_price: unit,
-          discount_pct_applied: disc,
-          line_total,
+            product_id: p.id,
+            qty_bags: qty,
+            unit_price: unit,
+            discount_pct_applied: disc,
+            line_total,
         });
       }
 
@@ -120,6 +111,7 @@ app.post("/webhook", async (req, res) => {
       );
 
       const total = orderItemsData.reduce((s, i) => s + Number(i.line_total), 0);
+
       const order = await prisma.order.create({
         data: {
           customer_id: customer.id,
@@ -132,6 +124,13 @@ app.post("/webhook", async (req, res) => {
         },
       });
 
+      const fmtCOP = (n) =>
+        Number(n).toLocaleString("es-CO", {
+          style: "currency",
+          currency: "COP",
+          maximumFractionDigits: 0,
+        });
+
       const eta =
         (sch.delivery_at || sch.ready_at).toLocaleString("es-CO", {
           timeZone: "America/Bogota",
@@ -139,7 +138,10 @@ app.post("/webhook", async (req, res) => {
 
       await sendText(
         from,
-        `Pedido #${order.id.slice(0, 8)} recibido desde catálogo.\nTotal: ${fmtCOP(
+        `Pedido #${order.id.slice(
+          0,
+          8
+        )} recibido desde catálogo.\nTotal: ${fmtCOP(
           total
         )}\nEntrega estimada: ${eta}\nPor favor realiza el pago y envía el comprobante para confirmar.`
       );
@@ -203,7 +205,7 @@ app.post("/webhook", async (req, res) => {
         const order = await prisma.order.create({
           data: {
             customer_id: customer.id,
-            status: SAFE_STATUS, // ← usa el mismo status robusto
+            status: SAFE_STATUS, // ← aquí también usamos el status robusto
             total_bags,
             total,
             items: { create: orderItemsData },
@@ -212,9 +214,19 @@ app.post("/webhook", async (req, res) => {
           },
         });
 
+        const fmtCOP = (n) =>
+          Number(n).toLocaleString("es-CO", {
+            style: "currency",
+            currency: "COP",
+            maximumFractionDigits: 0,
+          });
+
         await sendText(
           from,
-          `Tu pedido #${order.id.slice(0, 8)} está pre-agendado. Total: ${fmtCOP(
+          `Tu pedido #${order.id.slice(
+            0,
+            8
+          )} está pre-agendado. Total: ${fmtCOP(
             total
           )}. Entrega estimada: ${(sch.delivery_at || sch.ready_at).toLocaleString(
             "es-CO",
@@ -227,7 +239,7 @@ app.post("/webhook", async (req, res) => {
 
     // ───────────── Fallback SOLO texto ─────────────
     if (msg?.type === "text") {
-      const low = (msg.text?.body || "").trim().toLowerCase();
+      const low = text.toLowerCase();
       if (["catalogo", "catálogo", "menu", "menú"].includes(low)) {
         await sendText(
           from,

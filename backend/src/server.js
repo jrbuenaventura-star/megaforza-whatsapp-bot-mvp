@@ -408,25 +408,19 @@ if (ADMIN_WA && msg.type === 'text') {
       const total = subtotal - discount_total;
 
       // 7.5 Crear la orden
-      const StatusFromStr = Object.freeze({
-  pending_payment: OrderStatus.PENDING_PAYMENT,
-  paid:            OrderStatus.PAID,
-  scheduled:       OrderStatus.SCHEDULED,
-  in_production:   OrderStatus.IN_PRODUCTION,
-});
-      const order = await prisma.order.create({
-        data: {
-          customer_id: customer.id,
-          status: OrderStatus.PENDING_PAYMENT,
-          total_bags,
-          // subtotal,
-          // discount_total,
-          // total,
-          items: { create: orderItemsData },
-          scheduled_at: sch.scheduled_at,
-          ready_at: sch.ready_at
-        }
-      });
+      const orderData = {
+  customer_id: customer.id,
+  // Si por alguna razón OrderStatus no está cargado, usa el string como fallback
+  status: OrderStatus?.PENDING_PAYMENT ?? 'PENDING_PAYMENT',
+  total_bags,
+  items: { create: orderItemsData },
+  scheduled_at: sch.scheduled_at,
+  ready_at: sch.ready_at,
+};
+
+console.log('[ORDER CREATE keys]', Object.keys(orderData), 'status=', orderData.status);
+
+const order = await prisma.order.create({ data: orderData });
 
       // 7.6 Confirmar al cliente
       await sendText(

@@ -10,7 +10,7 @@ datasource db {
 model Customer {
   id             String   @id @default(uuid())
   name           String
-  doc_type       String
+  doc_type       DocType @db.Enum("doc_type")
   doc_number     String
   nit_dv         String?
   billing_email  String
@@ -23,7 +23,12 @@ model Customer {
   discounts CustomerProductDiscount[]
   orders    Order[]
 }
-
+enum DocType {
+  CEDULA
+  NIT
+  PASAPORTE
+  CE
+}
 model Product {
   id            String  @id @default(uuid())
   sku           String  @unique

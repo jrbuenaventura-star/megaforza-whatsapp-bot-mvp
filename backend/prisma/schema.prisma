@@ -58,23 +58,20 @@ enum OrderStatus {
 }
 
 model Order {
-  id            String      @id @default(uuid())
-  customer_id   String
-  customer      Customer    @relation(fields: [customer_id], references: [id])
+  id           String       @id @default(uuid())
+  customer_id  String
+  customer     Customer     @relation(fields: [customer_id], references: [id])
 
-  status        OrderStatus @default(PENDING)
-  total_bags     Int
-  subtotal_cents Int          
-  discount_cents Int          
-  total_cents    Int          
-  
-  scheduled_at   DateTime
-  ready_at       DateTime
-  delivered_at   DateTime?
-  created_at     DateTime     @default(now())
+  status       OrderStatus  @default(PENDING_PAYMENT)
+  total_bags   Int
 
-  items         OrderItem[]
-  customer       Customer     @relation(fields: [customer_id], references: [id])
+  scheduled_at DateTime?
+  ready_at     DateTime?
+  delivered_at DateTime?
+
+  created_at   DateTime     @default(now())
+
+  items        OrderItem[]
 }
 
 model OrderItem {

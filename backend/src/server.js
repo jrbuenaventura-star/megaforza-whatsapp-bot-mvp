@@ -24,7 +24,8 @@ const order = await prisma.order.create({
 // Logs de arranque
 console.log('[BOOT] OrderStatus (named):', Object.values(OrderStatus));
 console.log('[BOOT] OrderStatus (namespace):', Object.values(Prisma.OrderStatus ?? {}));
-
+console.log('[BOOT] OrderStatus (from dmmf):', Prisma.dmmf.datamodel.enums.find(e => e.name === 'OrderStatus')?.values
+);
 // ─── Admin (número de WhatsApp que recibirá alertas) ──────────────────────────
 const ADMIN_WA = (process.env.ADMIN_WA || '').replace(/[^\d]/g, '') || null;
 function notifyAdmin(text) {

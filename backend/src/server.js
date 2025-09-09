@@ -419,6 +419,9 @@ if (ADMIN_WA && msg.type === 'text') {
           customer_id: customer.id,
           status: OrderStatus.PENDING_PAYMENT,
           total_bags,
+          // subtotal,
+          // discount_total,
+          // total,
           items: { create: orderItemsData },
           scheduled_at: sch.scheduled_at,
           ready_at: sch.ready_at

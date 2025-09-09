@@ -8,7 +8,7 @@ import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
 
 // ─── Admin (número de WhatsApp que recibirá alertas) ──────────────────────────
-const ADMIN_WA = process.env.ADMIN_WA?.replace(/[^\d]/g, '') || null;
+const ADMIN_WA = (process.env.ADMIN_WA || '').replace(/[^\d]/g, '') || null;
 function notifyAdmin(text) {
   if (!ADMIN_WA) return;
   return sendText(ADMIN_WA, text);
@@ -254,7 +254,6 @@ if (ADMIN_WA && msg.type === 'text') {
        🔔 FORWARD AL ADMIN AQUÍ
        ─────────────────────────── */
     if (ADMIN_WA && from !== ADMIN_WA) {
-      const contactName = change?.contacts?.[0]?.profile?.name;
       let summary = '';
       if (msg.type === 'text') {
         summary = body || '(sin texto)';

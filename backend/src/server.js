@@ -6,7 +6,24 @@ import { sendText, sendButtons } from './wa.js';
 import { prisma } from './db.js';
 import { router as api } from './routes.js';
 import { scheduleOrderForItems } from './scheduler.js';
-import { OrderStatus } from '@prisma/client';
+import { Prisma, OrderStatus } from '@prisma/client'; // 👈 agrega Prisma también
+
+// ── Mapeo string → enum Prisma ────────────────────────────────────────────────
+const StatusFromStr = Object.freeze({
+  pending_payment: OrderStatus.PENDING_PAYMENT,
+  paid:            OrderStatus.PAID,
+  scheduled:       OrderStatus.SCHEDULED,
+  in_production:   OrderStatus.IN_PRODUCTION,
+});
+
+// Helper opcional para sanitizar:
+const asOrderStatus = (s) => StatusFromStr[String(s).toLowerCase()] ?? OrderStatus.PENDING_PAYMENT;
+
+const order = await prisma.order.create({
+
+// Logs de arranque
+console.log('[BOOT] OrderStatus (named):', Object.values(OrderStatus));
+console.log('[BOOT] OrderStatus (namespace):', Object.values(Prisma.OrderStatus ?? {}));
 
 // ─── Admin (número de WhatsApp que recibirá alertas) ──────────────────────────
 const ADMIN_WA = (process.env.ADMIN_WA || '').replace(/[^\d]/g, '') || null;
@@ -390,6 +407,12 @@ if (ADMIN_WA && msg.type === 'text') {
       const total = subtotal - discount_total;
 
       // 7.5 Crear la orden
+      const StatusFromStr = Object.freeze({
+  pending_payment: OrderStatus.PENDING_PAYMENT,
+  paid:            OrderStatus.PAID,
+  scheduled:       OrderStatus.SCHEDULED,
+  in_production:   OrderStatus.IN_PRODUCTION,
+});
       const order = await prisma.order.create({
         data: {
           customer_id: customer.id,

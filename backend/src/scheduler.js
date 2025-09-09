@@ -44,13 +44,15 @@ export async function scheduleOrderForItems(enrichedItems, now = new Date(), raw
   const start = startOfDayTZ(TZ, now);
   const end   = addDays(start, cfg.horizon_days);
 
-  // 2) Trae órdenes ya agendadas en esa ventana (¡sin filtro por status!)
-  const existing = await prisma.order.findMany({
-    where: {
-    status: { in: [OrderStatus.PAID, OrderStatus.SCHEDULED, OrderStatus.IN_PRODUCTION] },
+  // 2) Trae órdenes ya agendadas en esa ventana (con filtro por status)
+const existing = await prisma.order.findMany({
+  where: {
+    status: {
+      in: [OrderStatus.PAID, OrderStatus.SCHEDULED, OrderStatus.IN_PRODUCTION],
+    },
     scheduled_at: {
-      gte: new Date('2025-09-09T05:00:00.000Z'),
-      lt:  new Date('2025-11-08T05:00:00.000Z'),
+      gte: start,
+      lt:  end,
     },
   },
   include: { items: { include: { product: true } } },

@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  id             String   @id @default(uuid())
+  name           String
+  doc_type       String
+  doc_number     String
+  nit_dv         String?
+  billing_email  String
+  whatsapp_phone String   @unique
+  rut_url        String?
+  camara_url     String?
+  discount_pct   Decimal  @default(0)
+  created_at     DateTime @default(now())
+
+  discounts CustomerProductDiscount[]
+  orders    Order[]
+}
+
+model Product {
+  id            String  @id @default(uuid())
+  sku           String  @unique
+  name          String
+  pelletized    Boolean @default(false)
+  price_per_bag Decimal @default(0)
+  active        Boolean @default(true)
+
+  items     OrderItem[]
+  discounts CustomerProductDiscount[]
+}
+
+model CustomerProductDiscount {
+  customer     Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+  customer_id  String
+  product      Product  @relation(fields: [product_id], references: [id], onDelete: Cascade)
+  product_id   String
+  discount_pct Decimal
+
+  @@id([customer_id, product_id])
+}
+
+enum OrderStatus {
+  pending_payment
+  paid
+  scheduled
+  in_production
+  delivered
+  canceled
+}
+
+model Order {
+  id                String      @id @default(uuid())
+  customer          Customer    @relation(fields: [customer_id], references: [id])
+  customer_id       String
+  status            OrderStatus
+  total_bags        Int         @default(0)
+  subtotal          Decimal     @default(0)
+  discount_total    Decimal     @default(0)
+  total             Decimal     @default(0)
+  payment_proof_url String?
+  scheduled_at      DateTime?
+  ready_at          DateTime?
+  created_at        DateTime    @default(now())
+
+  items OrderItem[]
+}
+
+model OrderItem {
+  id                   String  @id @default(uuid())
+  order                Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  order_id             String
+  product              Product @relation(fields: [product_id], references: [id])
+  product_id           String
+  qty_bags             Int
+  unit_price           Decimal
+  discount_pct_applied Decimal @default(0)
+  line_total           Decimal
+}
+
+model CapacityConfig {
+  id                  Int    @id @default(1)
+  pellet_bph          Int
+  non_pellet_bph      Int
+  workday_start       String @default("08:00")
+  workday_end         String @default("17:00")
+  workdays            String @default("Mon,Tue,Wed,Thu,Fri,Sat")
+  timezone            String @default("America/Bogota")
+  dispatch_buffer_min Int    @default(60)
+}

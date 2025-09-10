@@ -1,18 +1,48 @@
-async function getData(){
-  const res = await fetch(process.env.NEXT_PUBLIC_API_BASE + '/customers', { cache: 'no-store' });
-  return res.json();
+// admin/app/customers/page.jsx
+import { apiGet } from "../../lib/api";
+
+async function getData() {
+  // Llama a tu backend: GET /api/customers
+  return await apiGet("/customers");
 }
-export default async function Page(){
-  const data = await getData();
+
+export default async function Page() {
+  const data = Array.isArray(await getData()) ? await getData() : [];
+
   return (
-    <div>
+    <div style={{ padding: 16 }}>
       <h1>Clientes</h1>
-      <table border="1" cellPadding="8" style={ borderCollapse:'collapse', width:'100%', background:'#fff' }>
-        <thead><tr><th>name</th><th>doc_type</th><th>doc_number</th><th>billing_email</th><th>whatsapp_phone</th><th>discount_pct</th><th>created_at</th></tr></thead>
+
+      <table
+        border="1"
+        cellPadding="8"
+        style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
+      >
+        <thead>
+          <tr>
+            <th>name</th>
+            <th>doc_type</th>
+            <th>doc_number</th>
+            <th>billing_email</th>
+            <th>whatsapp_phone</th>
+            <th>discount_pct</th>
+            <th>created_at</th>
+          </tr>
+        </thead>
         <tbody>
-          {data.map((row,idx)=> (
-            <tr key={idx}>
-              <td>{row['name']?.toString?.() ?? ''}</td><td>{row['doc_type']?.toString?.() ?? ''}</td><td>{row['doc_number']?.toString?.() ?? ''}</td><td>{row['billing_email']?.toString?.() ?? ''}</td><td>{row['whatsapp_phone']?.toString?.() ?? ''}</td><td>{row['discount_pct']?.toString?.() ?? ''}</td><td>{row['created_at']?.toString?.() ?? ''}</td>
+          {data.map((row) => (
+            <tr key={row.id}>
+              <td>{row?.name ?? ""}</td>
+              <td>{row?.doc_type ?? ""}</td>
+              <td>{row?.doc_number ?? ""}</td>
+              <td>{row?.billing_email ?? ""}</td>
+              <td>{row?.whatsapp_phone ?? ""}</td>
+              <td>{row?.discount_pct ?? ""}</td>
+              <td>
+                {row?.created_at
+                  ? new Date(row.created_at).toLocaleString("es-CO")
+                  : ""}
+              </td>
             </tr>
           ))}
         </tbody>

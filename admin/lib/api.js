@@ -19,3 +19,14 @@ export async function api(path, init) {
   }
   return res.json();
 }
+// Helpers cómodos usados por el Admin
+export function apiGet(path) {
+  return api(`/api${path}`, { method: 'GET' });
+}
+
+export function apiPatch(path, body) {
+  return api(`/api${path}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body || {}),
+  });
+}

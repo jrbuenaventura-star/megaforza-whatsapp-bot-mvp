@@ -1,3 +1,4 @@
+// backend/src/server.js
 import express from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
@@ -8,38 +9,61 @@ import { sendText } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
-// --- Utilidades de hora para Bogotá (UTC-5, sin DST) ---
-const BOGOTA_UTC_OFFSET_HOURS = 5;
-
-/** Devuelve la fecha clamped a 16:30 Bogotá SI estaba después de esa hora. */
-function clampTo1630Bogota(dateLike) {
-  if (!dateLike) return null;
-  const date = (dateLike instanceof Date) ? dateLike : new Date(dateLike);
-  // Construir 16:30 en Bogotá del MISMO día que 'date'
-  const clampUTC = Date.UTC(
-    date.getUTCFullYear(),
-    date.getUTCMonth(),
-    date.getUTCDate(),
-    16 + BOGOTA_UTC_OFFSET_HOURS, // 16:30 Bogotá -> UTC
-    30,
-    0,
-    0
-  );
-  const clampDate = new Date(clampUTC);
-  return date > clampDate ? clampDate : date;
-}
-
-/** Formatea en zona horaria de Bogotá. */
-function fmtBogota(dateLike) {
-  const d = (dateLike instanceof Date) ? dateLike : new Date(dateLike);
-  return d.toLocaleString('es-CO', { timeZone: 'America/Bogota' });
-}
-
 dotenv.config();
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+// ───────────────────── Utilidades ─────────────────────
+const fmtCOP = (n) =>
+  Number(n).toLocaleString("es-CO", {
+    style: "currency",
+    currency: "COP",
+    maximumFractionDigits: 0,
+  });
+
+/**
+ * Devuelve una fecha/hora de texto en zona Bogotá (America/Bogota),
+ * limitada a 16:30 si se pasa de esa hora.
+ */
+function fmtBogotaClamped1630(dateLike) {
+  // Tomar componentes en zona Bogotá
+  const parts = new Intl.DateTimeFormat("es-CO", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(dateLike);
+
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  const year = get("year");
+  const month = get("month");
+  const day = get("day");
+  let hour = parseInt(get("hour") || "0", 10);
+  let minute = parseInt(get("minute") || "0", 10);
+
+  // Topar a 16:30
+  if (hour > 16 || (hour === 16 && minute > 30)) {
+    hour = 16;
+    minute = 30;
+  }
+
+  const hh = hour.toString().padStart(2, "0");
+  const mm = minute.toString().padStart(2, "0");
+  return `${day}/${month}/${year} ${hh}:${mm}`;
+}
+
+/** Resuelve el enum de estado “pendiente de pago” de forma segura */
+function getSafePendingStatus() {
+  const S = Prisma?.OrderStatus ?? OrderStatus ?? {};
+  return S.PENDING_PAYMENT ?? S.pending_payment ?? "pending_payment";
+}
+
+// ───────────────────── Webhook VERIFY ─────────────────────
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -50,19 +74,23 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+// ───────────────────── Webhook RECEIVE ─────────────────────
 app.post("/webhook", async (req, res) => {
   try {
     const change = req.body.entry?.[0]?.changes?.[0];
     const entry = change?.value;
     const msg = entry?.messages?.[0];
+
+    // No hay mensaje (p. ej., son solo statuses)
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
 
-    // ─────────────────── Cliente ───────────────────
+    // ───────────── Cliente ─────────────
     let customer = await prisma.customer.findUnique({
       where: { whatsapp_phone: from },
     });
+
     if (!customer) {
       await sendText(
         from,
@@ -70,13 +98,6 @@ app.post("/webhook", async (req, res) => {
       );
       return res.sendStatus(200);
     }
-
-    // Status seguro (enum MAYÚSCULAS, minúsculas o string fallback)
-    const statusEnum = Prisma?.OrderStatus ?? OrderStatus ?? {};
-    const SAFE_STATUS =
-      statusEnum.PENDING_PAYMENT ?? // enum MAYÚSCULAS
-      statusEnum.pending_payment ?? // enum minúsculas (si vino de introspección)
-      "pending_payment";            // string fallback compatible
 
     // ───────────── Pedidos desde CATÁLOGO ─────────────
     if (msg?.type === "order") {
@@ -114,11 +135,11 @@ app.post("/webhook", async (req, res) => {
           pelletized: !!p.pelletized,
         });
         orderItemsData.push({
-            product_id: p.id,
-            qty_bags: qty,
-            unit_price: unit,
-            discount_pct_applied: disc,
-            line_total,
+          product_id: p.id,
+          qty_bags: qty,
+          unit_price: unit,
+          discount_pct_applied: disc,
+          line_total,
         });
       }
 
@@ -138,6 +159,7 @@ app.post("/webhook", async (req, res) => {
       );
 
       const total = orderItemsData.reduce((s, i) => s + Number(i.line_total), 0);
+      const SAFE_STATUS = getSafePendingStatus();
 
       const order = await prisma.order.create({
         data: {
@@ -151,26 +173,21 @@ app.post("/webhook", async (req, res) => {
         },
       });
 
-      const fmtCOP = (n) =>
-        Number(n).toLocaleString("es-CO", {
-          style: "currency",
-          currency: "COP",
-          maximumFractionDigits: 0,
-        });
+      const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
+      const etaTxt = fmtBogotaClamped1630(etaSource);
 
-const etaSourceCatalog = sch.delivery_at ?? sch.ready_at;
-const etaCatalog = fmtBogota(clampTo1630Bogota(etaSourceCatalog));
+      await sendText(
+        from,
+        `Pedido #${order.id.slice(0, 8)} recibido desde catálogo.\n` +
+          `Total: ${fmtCOP(total)}\n` +
+          `Entrega estimada: ${etaTxt}\n` +
+          `Por favor realiza el pago y envía el comprobante para confirmar.`
+      );
 
-await sendText(
-  from,
-  `Pedido #${order.id.slice(0, 8)} recibido desde catálogo.\n` +
-  `Total: ${fmtCOP(total)}\n` +
-  `Entrega estimada: ${etaCatalog}\n` +
-  `Por favor realiza el pago y envía el comprobante para confirmar.`
-);
-return res.sendStatus(200);
+      return res.sendStatus(200); // ← evita caer al fallback
+    }
 
-    // ───────────── Pedidos por TEXTO (opcional) ─────────────
+    // ───────────── Pedidos por TEXTO ─────────────
     const text = msg.text?.body?.trim() || "";
     if (msg?.type === "text" && /[xX]\s*\d+/.test(text)) {
       const pairs = text.split(/[;\n]+/);
@@ -218,15 +235,13 @@ return res.sendStatus(200);
           });
         }
 
-        const total = orderItemsData.reduce(
-          (s, i) => s + Number(i.line_total),
-          0
-        );
+        const total = orderItemsData.reduce((s, i) => s + Number(i.line_total), 0);
+        const SAFE_STATUS = getSafePendingStatus();
 
         const order = await prisma.order.create({
           data: {
             customer_id: customer.id,
-            status: SAFE_STATUS, // ← aquí también usamos el status robusto
+            status: SAFE_STATUS,
             total_bags,
             total,
             items: { create: orderItemsData },
@@ -235,24 +250,15 @@ return res.sendStatus(200);
           },
         });
 
-        const fmtCOP = (n) =>
-          Number(n).toLocaleString("es-CO", {
-            style: "currency",
-            currency: "COP",
-            maximumFractionDigits: 0,
-          });
+        const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
+        const etaTxt = fmtBogotaClamped1630(etaSource);
 
         await sendText(
           from,
-          `Tu pedido #${order.id.slice(
-            0,
-            8
-          )} está pre-agendado. Total: ${fmtCOP(
-            total
-          )}. Entrega estimada: ${(sch.delivery_at || sch.ready_at).toLocaleString(
-            "es-CO",
-            { timeZone: "America/Bogota" }
-          )}. Envía el soporte de pago para confirmar.`
+          `Tu pedido #${order.id.slice(0, 8)} está pre-agendado.\n` +
+            `Total: ${fmtCOP(total)}.\n` +
+            `Entrega estimada: ${etaTxt}.\n` +
+            `Envía el soporte de pago para confirmar.`
         );
         return res.sendStatus(200);
       }
@@ -283,8 +289,10 @@ return res.sendStatus(200);
   }
 });
 
+// ───────────────────── API ─────────────────────
 app.use("/api", api);
 
+// ───────────────────── Boot ─────────────────────
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Backend running on http://localhost:${port}`);

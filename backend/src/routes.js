@@ -56,17 +56,21 @@ function canonStatus(input) {
 }
 
 /**
- * Convierte a un valor **válido para la DB**:
- * - Si la columna es enum Prisma: devuelve el valor del enum (soporta MAYÚSCULAS y minúsculas).
- * - Si es texto: devuelve el string canónico.
+ * Devuelve un valor válido para guardar en DB:
+ * - Usa el enum de Prisma si existe (aceptando CLAVES UPPERCASE o lowercase)
+ * - Si no hay enum (columna texto), devuelve el string canónico en minúsculas
  */
 function toDbStatus(input) {
-  const canon = canonStatus(input);
+  const canon = canonStatus(input); // usa tu función que normaliza y valida
   if (!canon) return null;
+
   const statusEnum = Prisma?.OrderStatus ?? OrderStatus ?? {};
-  const upperKey = canon.toUpperCase();   // p.ej. PENDING_PAYMENT
-  const lowerKey = canon.toLowerCase();   // por si el enum quedó en minúsculas
-  return statusEnum[upperKey] ?? statusEnum[lowerKey] ?? canon;
+  // 1) enum UPPERCASE (p. ej. PENDING_PAYMENT)
+  if (statusEnum[canon.toUpperCase()]) return statusEnum[canon.toUpperCase()];
+  // 2) enum lowercase (p. ej. pending_payment)
+  if (statusEnum[canon]) return statusEnum[canon];
+  // 3) fallback a string (DB sin enum)
+  return canon;
 }
 
 /* ───────────────────────── endpoints ───────────────────────── */

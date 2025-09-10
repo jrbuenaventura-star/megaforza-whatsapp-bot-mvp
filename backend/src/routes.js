@@ -10,22 +10,20 @@ export const router = express.Router();
 
 /* ───────────────────────── helpers de estado ───────────────────────── */
 
-/** Estados canónicos que usa la app (strings) */
+// Estados canónicos de la app (nuestro “vocabulario”)
 const CANON_STATUSES = [
   "pending_payment",
-  "processing",
-  "ready",
+  "processing",   // puede mapear a in_production en BD
+  "ready",        // puede mapear a scheduled en BD
   "delivered",
   "canceled",
 ];
 
-/** Mapa de sinónimos → estado canónico */
+// Sinónimos → canónico
 const STATUS_SYNONYMS = {
-  // pagos
+  // pagos / producción
   paid: "processing",
   payment_received: "processing",
-
-  // producción
   in_production: "processing",
   "in-production": "processing",
   produccion: "processing",
@@ -36,7 +34,7 @@ const STATUS_SYNONYMS = {
   programado: "ready",
   listo: "ready",
 
-  // cancelaciones (inglés GB y variantes)
+  // cancelaciones (GB)
   cancelled: "canceled",
   cancel: "canceled",
 
@@ -46,32 +44,60 @@ const STATUS_SYNONYMS = {
 };
 
 /**
- * Convierte cualquier entrada a un estado **canónico** (string) o `null` si no es válido.
- * Acepta sinónimos y normaliza a minúsculas.
+ * Convierte el input a estado canónico (string) o null.
  */
 function canonStatus(input) {
   if (!input) return null;
   const raw = String(input).trim().toLowerCase();
-  const mapped = STATUS_SYNONYMS[raw] || raw;
-  return CANON_STATUSES.includes(mapped) ? mapped : null;
+  const canon = STATUS_SYNONYMS[raw] ?? raw;
+  return CANON_STATUSES.includes(canon) ? canon : null;
 }
 
 /**
- * Devuelve un valor válido para guardar en DB:
- * - Usa el enum de Prisma si existe (aceptando CLAVES UPPERCASE o lowercase)
- * - Si no hay enum (columna texto), devuelve el string canónico en minúsculas
+ * Devuelve el valor que **sí acepta la BD**:
+ * - Si la BD ya tiene ese valor exacto, úsalo.
+ * - Si no, mapea:
+ *    processing  -> in_production   (si existe)
+ *    ready       -> scheduled       (si existe)
+ * - También el espejo (por si alguna BD ya usa processing/ready).
+ * - Si nada calza, null para forzar 400.
  */
 function toDbStatus(input) {
   const canon = canonStatus(input);
   if (!canon) return null;
 
-  const statusEnum = Prisma?.OrderStatus ?? OrderStatus ?? {};
-  // 1) enum UPPERCASE (p. ej. PENDING_PAYMENT)
-  if (statusEnum[canon.toUpperCase()]) return statusEnum[canon.toUpperCase()];
-  // 2) enum lowercase (p. ej. pending_payment)
-  if (statusEnum[canon]) return statusEnum[canon];
-  // 3) fallback a string (DB sin enum)
-  return canon;
+  const statusEnum = (Prisma?.OrderStatus ?? OrderStatus ?? {});
+  const enumKeys = Object.keys(statusEnum);
+  const enumVals = Object.values(statusEnum);
+  const has = (val) => enumKeys.includes(val) || enumVals.includes(val);
+
+  // 1) ¿La BD tiene el valor canónico tal cual?
+  if (has(canon)) return statusEnum[canon] ?? canon;
+
+  // 2) Mapeos preferidos BD antigua (supabase) o similares
+  const forwardMap = {
+    processing: "in_production",
+    ready: "scheduled",
+  };
+  const backMap = {
+    in_production: "processing",
+    scheduled: "ready",
+  };
+
+  // intenta forward
+  if (forwardMap[canon] && has(forwardMap[canon])) {
+    const target = forwardMap[canon];
+    return statusEnum[target] ?? target;
+  }
+
+  // intenta back (por si tu enum ya es processing/ready)
+  if (backMap[canon] && has(backMap[canon])) {
+    const target = backMap[canon];
+    return statusEnum[target] ?? target;
+  }
+
+  // 3) Último intento: usa exactamente el string canónico si no hay enum
+  return has(canon) ? (statusEnum[canon] ?? canon) : null;
 }
 
 /* ───────────────────────── endpoints ───────────────────────── */

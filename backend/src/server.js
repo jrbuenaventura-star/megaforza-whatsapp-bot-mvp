@@ -8,6 +8,33 @@ import { sendText } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
+// --- Utilidades de hora para Bogotá (UTC-5, sin DST) ---
+const BOGOTA_UTC_OFFSET_HOURS = 5;
+
+/** Devuelve la fecha clamped a 16:30 Bogotá SI estaba después de esa hora. */
+function clampTo1630Bogota(dateLike) {
+  if (!dateLike) return null;
+  const date = (dateLike instanceof Date) ? dateLike : new Date(dateLike);
+  // Construir 16:30 en Bogotá del MISMO día que 'date'
+  const clampUTC = Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    16 + BOGOTA_UTC_OFFSET_HOURS, // 16:30 Bogotá -> UTC
+    30,
+    0,
+    0
+  );
+  const clampDate = new Date(clampUTC);
+  return date > clampDate ? clampDate : date;
+}
+
+/** Formatea en zona horaria de Bogotá. */
+function fmtBogota(dateLike) {
+  const d = (dateLike instanceof Date) ? dateLike : new Date(dateLike);
+  return d.toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+}
+
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -131,23 +158,17 @@ app.post("/webhook", async (req, res) => {
           maximumFractionDigits: 0,
         });
 
-      const eta =
-        (sch.delivery_at || sch.ready_at).toLocaleString("es-CO", {
-          timeZone: "America/Bogota",
-        });
+const etaSourceCatalog = sch.delivery_at ?? sch.ready_at;
+const etaCatalog = fmtBogota(clampTo1630Bogota(etaSourceCatalog));
 
-      await sendText(
-        from,
-        `Pedido #${order.id.slice(
-          0,
-          8
-        )} recibido desde catálogo.\nTotal: ${fmtCOP(
-          total
-        )}\nEntrega estimada: ${eta}\nPor favor realiza el pago y envía el comprobante para confirmar.`
-      );
-
-      return res.sendStatus(200); // ← evita caer al fallback
-    }
+await sendText(
+  from,
+  `Pedido #${order.id.slice(0, 8)} recibido desde catálogo.\n` +
+  `Total: ${fmtCOP(total)}\n` +
+  `Entrega estimada: ${etaCatalog}\n` +
+  `Por favor realiza el pago y envía el comprobante para confirmar.`
+);
+return res.sendStatus(200);
 
     // ───────────── Pedidos por TEXTO (opcional) ─────────────
     const text = msg.text?.body?.trim() || "";

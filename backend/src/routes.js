@@ -1,4 +1,3 @@
-cat > backend/src/routes.js <<'EOF'
 import express from "express";
 import multer from "multer";
 import { prisma } from "./db.js";
@@ -13,8 +12,8 @@ export const router = express.Router();
 // Estados canónicos de la app (nuestro “vocabulario”)
 const CANON_STATUSES = [
   "pending_payment",
-  "processing",   // puede mapear a in_production en BD
-  "ready",        // puede mapear a scheduled en BD
+  "processing",   // mapea a in_production en BD si no existe processing
+  "ready",        // mapea a scheduled en BD si no existe ready
   "delivered",
   "canceled",
 ];
@@ -43,9 +42,7 @@ const STATUS_SYNONYMS = {
   awaiting_payment: "pending_payment",
 };
 
-/**
- * Convierte el input a estado canónico (string) o null.
- */
+/** Convierte el input a estado canónico (string) o null. */
 function canonStatus(input) {
   if (!input) return null;
   const raw = String(input).trim().toLowerCase();
@@ -57,55 +54,41 @@ function canonStatus(input) {
  * Devuelve el valor que **sí acepta la BD**:
  * - Si la BD ya tiene ese valor exacto, úsalo.
  * - Si no, mapea:
- *    processing  -> in_production   (si existe)
- *    ready       -> scheduled       (si existe)
- * - También el espejo (por si alguna BD ya usa processing/ready).
- * - Si nada calza, null para forzar 400.
+ *    processing  -> in_production
+ *    ready       -> scheduled
+ * - Si la BD ya usa processing/ready, respeta eso.
+ * - Si nada calza, retorna null.
  */
 function toDbStatus(input) {
   const canon = canonStatus(input);
   if (!canon) return null;
 
   const statusEnum = (Prisma?.OrderStatus ?? OrderStatus ?? {});
-  const enumKeys = Object.keys(statusEnum);
-  const enumVals = Object.values(statusEnum);
+  const enumKeys = Object.keys(statusEnum);   // ej: ["pending_payment", "scheduled",...]
+  const enumVals = Object.values(statusEnum); // ej: ["pending_payment", "scheduled",...]
+
   const has = (val) => enumKeys.includes(val) || enumVals.includes(val);
+  const asEnum = (val) => statusEnum[val] ?? val;
 
   // 1) ¿La BD tiene el valor canónico tal cual?
-  if (has(canon)) return statusEnum[canon] ?? canon;
+  if (has(canon)) return asEnum(canon);
 
-  // 2) Mapeos preferidos BD antigua (supabase) o similares
-  const forwardMap = {
-    processing: "in_production",
-    ready: "scheduled",
-  };
-  const backMap = {
-    in_production: "processing",
-    scheduled: "ready",
-  };
+  // 2) Mapeos preferidos BD (Supabase suele tener scheduled/in_production)
+  const forwardMap = { processing: "in_production", ready: "scheduled" };
+  const backMap    = { in_production: "processing", scheduled: "ready" };
 
-  // intenta forward
-  if (forwardMap[canon] && has(forwardMap[canon])) {
-    const target = forwardMap[canon];
-    return statusEnum[target] ?? target;
-  }
+  if (forwardMap[canon] && has(forwardMap[canon])) return asEnum(forwardMap[canon]);
+  if (backMap[canon]    && has(backMap[canon]))    return asEnum(backMap[canon]);
 
-  // intenta back (por si tu enum ya es processing/ready)
-  if (backMap[canon] && has(backMap[canon])) {
-    const target = backMap[canon];
-    return statusEnum[target] ?? target;
-  }
-
-  // 3) Último intento: usa exactamente el string canónico si no hay enum
-  return has(canon) ? (statusEnum[canon] ?? canon) : null;
+  // 3) Si no hay enum (columna texto), retorna el string canónico
+  return has(canon) ? asEnum(canon) : null;
 }
 
 /* ───────────────────────── endpoints ───────────────────────── */
 
-// Health
 router.get("/health", (req, res) => res.json({ ok: true }));
 
-/* Productos */
+// Productos
 router.get("/products", async (req, res) => {
   const products = await prisma.product.findMany({
     where: { active: true },
@@ -116,22 +99,14 @@ router.get("/products", async (req, res) => {
 
 router.patch("/products/:id", async (req, res) => {
   const { price_per_bag, active } = req.body;
-  const data = {};
-  if (price_per_bag !== undefined) data.price_per_bag = Number(price_per_bag);
-  if (active !== undefined)
-    data.active =
-      typeof active === "boolean"
-        ? active
-        : String(active).toLowerCase() === "true";
-
   const p = await prisma.product.update({
     where: { id: req.params.id },
-    data,
+    data: { price_per_bag, active },
   });
   res.json(p);
 });
 
-/* Capacidad */
+// Capacidad
 router.get("/config/capacity", async (req, res) => {
   const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
   res.json(cfg);
@@ -147,7 +122,7 @@ router.post("/config/capacity", async (req, res) => {
   res.json(cfg);
 });
 
-/* Clientes */
+// Clientes
 router.get("/customers", async (req, res) => {
   const q = req.query.q?.toString() || "";
   const customers = await prisma.customer.findMany({
@@ -178,7 +153,6 @@ router.post(
     } = req.body;
     const rut = req.files?.rut?.[0]?.path || null;
     const cam = req.files?.camara?.[0]?.path || null;
-
     const c = await prisma.customer.create({
       data: {
         name,
@@ -205,13 +179,11 @@ router.patch("/customers/:id", async (req, res) => {
   res.json(c);
 });
 
-/* Pedidos */
-
-// Listado (con filtro opcional por status; acepta sinónimos)
+// Pedidos
 router.get("/orders", async (req, res) => {
   const qStatus = req.query.status?.toString();
-  const canon = canonStatus(qStatus);
-  const where = canon ? { status: toDbStatus(canon) } : {};
+  const safe = toDbStatus(qStatus);
+  const where = safe ? { status: safe } : {};
   const orders = await prisma.order.findMany({
     where,
     include: { customer: true, items: { include: { product: true } } },
@@ -220,12 +192,9 @@ router.get("/orders", async (req, res) => {
   res.json(orders);
 });
 
-// Crear pedido manual (desde Admin)
 router.post("/orders", async (req, res) => {
   const { customer_id, items } = req.body;
-  const customer = await prisma.customer.findUnique({
-    where: { id: customer_id },
-  });
+  const customer = await prisma.customer.findUnique({ where: { id: customer_id } });
   if (!customer) return res.status(400).json({ error: "Customer not found" });
 
   const prods = await prisma.product.findMany({
@@ -234,25 +203,18 @@ router.post("/orders", async (req, res) => {
   const prodsMap = new Map(prods.map((p) => [p.id, p]));
   const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
 
-  let subtotal = 0;
-  let discount_total = 0;
-  let total_bags = 0;
+  let subtotal = 0, discount_total = 0, total_bags = 0;
   const orderItemsData = [];
-
   for (const it of items) {
     const p = prodsMap.get(it.product_id);
     if (!p) continue;
-
     const qty = Number(it.qty_bags);
-    const unitPrice = Number(p.price_per_bag || 0);
-    const discountPct = Number(customer.discount_pct || 0);
-
     total_bags += qty;
+    const unitPrice = Number(p.price_per_bag);
+    const discountPct = Number(customer.discount_pct || 0);
+    const line = qty * unitPrice * (discountPct ? 1 - discountPct / 100 : 1);
     subtotal += qty * unitPrice;
     discount_total += qty * unitPrice * (discountPct / 100);
-
-    const line = qty * unitPrice * (discountPct ? 1 - discountPct / 100 : 1);
-
     orderItemsData.push({
       product_id: p.id,
       qty_bags: qty,
@@ -261,8 +223,8 @@ router.post("/orders", async (req, res) => {
       line_total: line,
     });
   }
-
   const total = subtotal - discount_total;
+
   const DEFAULT_STATUS = toDbStatus("pending_payment");
 
   const order = await prisma.order.create({
@@ -278,13 +240,11 @@ router.post("/orders", async (req, res) => {
     include: { items: { include: { product: true } } },
   });
 
-  // Programación de producción/entrega
   const enriched = order.items.map((i) => ({
     qty_bags: i.qty_bags,
     pelletized: i.product.pelletized,
   }));
   const sch = await scheduleOrderForItems(enriched, new Date(), cfg);
-
   await prisma.order.update({
     where: { id: order.id },
     data: { scheduled_at: sch.scheduled_at, ready_at: sch.ready_at },
@@ -293,23 +253,20 @@ router.post("/orders", async (req, res) => {
   res.json({ order, estimated_delivery_at: sch.delivery_at });
 });
 
-// Actualizar estado (acepta sinónimos)
+// Actualizar estado de una orden
 router.patch("/orders/:id", async (req, res) => {
   try {
-    let { status } = req.body;
-    if (!status) {
-      return res.status(400).json({ error: "status requerido" });
-    }
-    const safe = toDbStatus(status);
-    if (!safe) {
-      return res.status(400).json({
-        error: `status inválido. Use: ${CANON_STATUSES.join(", ")}`,
-      });
+    const { status } = req.body;
+    const dbStatus = toDbStatus(status);
+    if (!dbStatus) {
+      return res
+        .status(400)
+        .json({ error: `status inválido. Use: ${CANON_STATUSES.join(", ")}` });
     }
 
     const order = await prisma.order.update({
       where: { id: req.params.id },
-      data: { status: safe },
+      data: { status: dbStatus },
       include: { customer: true, items: true },
     });
     res.json(order);
@@ -319,7 +276,6 @@ router.patch("/orders/:id", async (req, res) => {
   }
 });
 
-// Marcar entregado (atajo)
 router.post("/orders/:id/markDelivered", async (req, res) => {
   const safe = toDbStatus("delivered");
   const o = await prisma.order.update({
@@ -329,15 +285,16 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
   res.json(o);
 });
 
-/* Reportes */
+// Reporte: pendiente por cliente
 router.get("/reports/pendingByCustomer", async (req, res) => {
-  // Estados que consideramos "pendientes" para el reporte
-  const pendingSet = ["pending_payment", "processing", "ready"].map((s) =>
-    toDbStatus(s)
-  );
+  const pendingSet = ["pending_payment", "processing", "ready"]; // canónicos
+  // Mapea a valores reales de BD para el filtro (por si tu enum no usa canónicos)
+  const pendingForDb = pendingSet
+    .map((s) => toDbStatus(s))
+    .filter(Boolean);
 
   const orders = await prisma.order.findMany({
-    where: { status: { in: pendingSet } },
+    where: { status: { in: pendingForDb } },
     include: { customer: true, items: { include: { product: true } } },
     orderBy: { created_at: "asc" },
   });
@@ -353,4 +310,3 @@ router.get("/reports/pendingByCustomer", async (req, res) => {
   }
   res.json(report);
 });
-EOF

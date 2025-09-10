@@ -7,8 +7,10 @@ import { Prisma, OrderStatus } from "@prisma/client";
 const upload = multer({ dest: "uploads/" });
 export const router = express.Router();
 
-// ───────────────────────── helpers de estado ─────────────────────────
-const ALLOWED_STATUSES = [
+/* ───────────────────────── helpers de estado ───────────────────────── */
+
+// Estados canónicos que usamos en la app
+const CANON_STATUSES = [
   "pending_payment",
   "processing",
   "ready",
@@ -16,16 +18,59 @@ const ALLOWED_STATUSES = [
   "canceled",
 ];
 
-function toSafeStatus(input) {
+// Mapa de sinónimos → estado canónico
+const STATUS_SYNONYMS = {
+  // pagos
+  paid: "processing",
+  payment_received: "processing",
+
+  // producción
+  in_production: "processing",
+  "in-production": "processing",
+  produccion: "processing",
+  producción: "processing",
+
+  // programado / listo
+  scheduled: "ready",
+  programado: "ready",
+  listo: "ready",
+
+  // cancelaciones (inglés GB y variantes)
+  cancelled: "canceled",
+  cancel: "canceled",
+
+  // pendientes
+  pending: "pending_payment",
+  awaiting_payment: "pending_payment",
+};
+
+/**
+ * Convierte cualquier entrada a un estado **canónico** (string) o `null` si no es válido.
+ * Acepta sinónimos y normaliza a minúsculas.
+ */
+function canonStatus(input) {
   if (!input) return null;
-  const s = String(input).toLowerCase();
-  if (!ALLOWED_STATUSES.includes(s)) return null;
-  const statusEnum = Prisma?.OrderStatus ?? OrderStatus ?? {};
-  // Devuelve el enum si existe, si no, el string (para DBs sin enum)
-  return statusEnum[s.toUpperCase()] ?? s;
+  const raw = String(input).trim().toLowerCase();
+  const canon = STATUS_SYNONYMS[raw] ?? raw;
+  return CANON_STATUSES.includes(canon) ? canon : null;
 }
 
-// ───────────────────────── endpoints ─────────────────────────
+/**
+ * Convierte a un valor **válido para la DB**:
+ * - Si la columna es enum Prisma: devuelve el valor del enum (soporta MAYÚSCULAS y minúsculas).
+ * - Si es texto: devuelve el string canónico.
+ */
+function toDbStatus(input) {
+  const canon = canonStatus(input);
+  if (!canon) return null;
+  const statusEnum = Prisma?.OrderStatus ?? OrderStatus ?? {};
+  const upperKey = canon.toUpperCase();   // p.ej. PENDING_PAYMENT
+  const lowerKey = canon.toLowerCase();   // por si el enum quedó en minúsculas
+  return statusEnum[upperKey] ?? statusEnum[lowerKey] ?? canon;
+}
+
+/* ───────────────────────── endpoints ───────────────────────── */
+
 router.get("/health", (req, res) => res.json({ ok: true }));
 
 // Productos
@@ -122,7 +167,7 @@ router.patch("/customers/:id", async (req, res) => {
 // Pedidos
 router.get("/orders", async (req, res) => {
   const qStatus = req.query.status?.toString();
-  const safe = toSafeStatus(qStatus);
+  const safe = toDbStatus(qStatus);
   const where = safe ? { status: safe } : {};
   const orders = await prisma.order.findMany({
     where,
@@ -169,7 +214,8 @@ router.post("/orders", async (req, res) => {
   }
   const total = subtotal - discount_total;
 
-  const DEFAULT_STATUS = toSafeStatus("pending_payment");
+  // status por defecto (si columna es enum usa enum, si no, string)
+  const DEFAULT_STATUS = toDbStatus("pending_payment");
 
   const order = await prisma.order.create({
     data: {
@@ -197,18 +243,18 @@ router.post("/orders", async (req, res) => {
   res.json({ order, estimated_delivery_at: sch.delivery_at });
 });
 
-// ✅ NUEVO: actualizar estado de una orden
+// Actualizar estado de una orden
 router.patch("/orders/:id", async (req, res) => {
   try {
     let { status } = req.body;
     if (!status) {
       return res.status(400).json({ error: "status requerido" });
     }
-    const safe = toSafeStatus(status);
+    const safe = toDbStatus(status);
     if (!safe) {
       return res
         .status(400)
-        .json({ error: `status inválido. Use: ${ALLOWED_STATUSES.join(", ")}` });
+        .json({ error: `status inválido. Use: ${CANON_STATUSES.join(", ")}` });
     }
 
     const order = await prisma.order.update({
@@ -223,8 +269,9 @@ router.patch("/orders/:id", async (req, res) => {
   }
 });
 
+// Marcar entregado
 router.post("/orders/:id/markDelivered", async (req, res) => {
-  const safe = toSafeStatus("delivered");
+  const safe = toDbStatus("delivered");
   const o = await prisma.order.update({
     where: { id: req.params.id },
     data: { status: safe },
@@ -234,12 +281,8 @@ router.post("/orders/:id/markDelivered", async (req, res) => {
 
 // Reportes
 router.get("/reports/pendingByCustomer", async (req, res) => {
-  const pendingSet = [
-    "pending_payment",
-    "paid",
-    "scheduled",
-    "in_production",
-  ];
+  // “Pendientes” en términos operativos
+  const pendingSet = ["pending_payment", "processing", "ready"];
   const orders = await prisma.order.findMany({
     where: { status: { in: pendingSet } },
     include: { customer: true, items: { include: { product: true } } },

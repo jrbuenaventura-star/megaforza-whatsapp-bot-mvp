@@ -24,12 +24,14 @@ const fmtCOP = (n) =>
   });
 
 /**
- * Devuelve una fecha/hora de texto en zona Bogotá (America/Bogota),
- * limitada a 16:30 si se pasa de esa hora.
+/**
+ * Regla de negocio:
+ * - Si la hora en Bogotá es > 16:30, mover la entrega al día siguiente a las 08:00 (Bogotá).
+ * - Si no, dejar la hora tal cual.
+ * Nota: Bogotá está en UTC-5 (sin DST). 08:00 BOG = 13:00 UTC.
  */
-function fmtBogotaClamped1630(dateLike) {
-  // Tomar componentes en zona Bogotá
-  const parts = new Intl.DateTimeFormat("es-CO", {
+function etaTextBogotaNextDayIfAfter1630(dateLike) {
+  const fmtParts = new Intl.DateTimeFormat("es-CO", {
     timeZone: "America/Bogota",
     year: "numeric",
     month: "2-digit",
@@ -39,22 +41,28 @@ function fmtBogotaClamped1630(dateLike) {
     hour12: false,
   }).formatToParts(dateLike);
 
-  const get = (t) => parts.find((p) => p.type === t)?.value;
-  const year = get("year");
-  const month = get("month");
-  const day = get("day");
-  let hour = parseInt(get("hour") || "0", 10);
-  let minute = parseInt(get("minute") || "0", 10);
+  const get = (t) => fmtParts.find((p) => p.type === t)?.value;
 
-  // Topar a 16:30
-  if (hour > 16 || (hour === 16 && minute > 30)) {
-    hour = 16;
-    minute = 30;
-  }
+  const year = parseInt(get("year"), 10);
+  const month = parseInt(get("month"), 10);
+  const day = parseInt(get("day"), 10);
+  const hour = parseInt(get("hour") || "0", 10);
+  const minute = parseInt(get("minute") || "0", 10);
 
-  const hh = hour.toString().padStart(2, "0");
-  const mm = minute.toString().padStart(2, "0");
-  return `${day}/${month}/${year} ${hh}:${mm}`;
+  const after1630 = hour > 16 || (hour === 16 && minute > 30);
+
+  const outDate = after1630
+    // Siguiente día a las 08:00 Bogotá → 13:00 UTC
+    ? new Date(Date.UTC(year, month - 1, day + 1, 13, 0, 0))
+    // Dejar igual
+    : new Date(dateLike);
+
+  return new Intl.DateTimeFormat("es-CO", {
+    timeZone: "America/Bogota",
+    dateStyle: "short",
+    timeStyle: "short",
+    hour12: false,
+  }).format(outDate);
 }
 
 /** Resuelve el enum de estado “pendiente de pago” de forma segura */
@@ -173,8 +181,8 @@ app.post("/webhook", async (req, res) => {
         },
       });
 
-      const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
-      const etaTxt = fmtBogotaClamped1630(etaSource);
+const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
+const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
 
       await sendText(
         from,
@@ -250,8 +258,8 @@ app.post("/webhook", async (req, res) => {
           },
         });
 
-        const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
-        const etaTxt = fmtBogotaClamped1630(etaSource);
+const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
+const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
 
         await sendText(
           from,

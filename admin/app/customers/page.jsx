@@ -2,12 +2,12 @@
 import { apiGet } from "../../lib/api";
 
 async function getData() {
-  // Llama a tu backend: GET /api/customers
+  // GET /api/customers en tu backend
   return await apiGet("/customers");
 }
 
 export default async function Page() {
-  const data = Array.isArray(await getData()) ? await getData() : [];
+  const rows = Array.isArray(await getData()) ? await getData() : [];
 
   return (
     <div style={{ padding: 16 }}>
@@ -30,7 +30,7 @@ export default async function Page() {
           </tr>
         </thead>
         <tbody>
-          {data.map((row) => (
+          {rows.map((row) => (
             <tr key={row.id}>
               <td>{row?.name ?? ""}</td>
               <td>{row?.doc_type ?? ""}</td>

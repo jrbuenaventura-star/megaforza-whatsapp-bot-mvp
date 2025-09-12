@@ -1,20 +1,16 @@
 import { apiGet } from "@/lib/api";
 
-async function getData() {
-  // apiGet antepone /api al path y usa NEXT_PUBLIC_API_BASE
-  return apiGet("/customers");
-}
-
 export default async function Page() {
-  const data = await getData();
+  // Trae clientes desde el backend (usa NEXT_PUBLIC_API_BASE internamente)
+  const data = await apiGet("/customers");
 
   return (
-    <div>
+    <div style={{ padding: 16 }}>
       <h1>Clientes</h1>
 
       <table
-        border={1}
-        cellPadding={8}
+        border="1"
+        cellPadding="8"
         style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
       >
         <thead>
@@ -29,23 +25,31 @@ export default async function Page() {
           </tr>
         </thead>
         <tbody>
-          {data.map((row) => (
-            <tr key={row.id}>
-              <td>{row.name ?? ""}</td>
-              <td>{row.doc_type ?? ""}</td>
-              <td>{row.doc_number ?? ""}</td>
-              <td>{row.billing_email ?? ""}</td>
-              <td>{row.whatsapp_phone ?? ""}</td>
-              <td>{row.discount_pct ?? 0}</td>
-              <td>
-                {row.created_at
-                  ? new Date(row.created_at).toLocaleString("es-CO", {
-                      timeZone: "America/Bogota",
-                    })
-                  : ""}
+          {Array.isArray(data) && data.length > 0 ? (
+            data.map((row) => (
+              <tr key={row.id}>
+                <td>{row?.name ?? ""}</td>
+                <td>{row?.doc_type ?? ""}</td>
+                <td>{row?.doc_number ?? ""}</td>
+                <td>{row?.billing_email ?? ""}</td>
+                <td>{row?.whatsapp_phone ?? ""}</td>
+                <td>{Number(row?.discount_pct ?? 0)}%</td>
+                <td>
+                  {row?.created_at
+                    ? new Date(row.created_at).toLocaleString("es-CO", {
+                        timeZone: "America/Bogota",
+                      })
+                    : ""}
+                </td>
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td colSpan={7} style={{ textAlign: "center" }}>
+                Sin resultados
               </td>
             </tr>
-          ))}
+          )}
         </tbody>
       </table>
     </div>

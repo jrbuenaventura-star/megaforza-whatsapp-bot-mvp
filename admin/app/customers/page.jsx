@@ -1,21 +1,20 @@
-// admin/app/customers/page.jsx
-import { apiGet } from "../../lib/api";
+import { apiGet } from "@/lib/api";
 
 async function getData() {
-  // GET /api/customers en tu backend
-  return await apiGet("/customers");
+  // apiGet antepone /api al path y usa NEXT_PUBLIC_API_BASE
+  return apiGet("/customers");
 }
 
 export default async function Page() {
-  const rows = Array.isArray(await getData()) ? await getData() : [];
+  const data = await getData();
 
   return (
-    <div style={{ padding: 16 }}>
+    <div>
       <h1>Clientes</h1>
 
       <table
-        border="1"
-        cellPadding="8"
+        border={1}
+        cellPadding={8}
         style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
       >
         <thead>
@@ -30,17 +29,19 @@ export default async function Page() {
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
+          {data.map((row) => (
             <tr key={row.id}>
-              <td>{row?.name ?? ""}</td>
-              <td>{row?.doc_type ?? ""}</td>
-              <td>{row?.doc_number ?? ""}</td>
-              <td>{row?.billing_email ?? ""}</td>
-              <td>{row?.whatsapp_phone ?? ""}</td>
-              <td>{row?.discount_pct ?? ""}</td>
+              <td>{row.name ?? ""}</td>
+              <td>{row.doc_type ?? ""}</td>
+              <td>{row.doc_number ?? ""}</td>
+              <td>{row.billing_email ?? ""}</td>
+              <td>{row.whatsapp_phone ?? ""}</td>
+              <td>{row.discount_pct ?? 0}</td>
               <td>
-                {row?.created_at
-                  ? new Date(row.created_at).toLocaleString("es-CO")
+                {row.created_at
+                  ? new Date(row.created_at).toLocaleString("es-CO", {
+                      timeZone: "America/Bogota",
+                    })
                   : ""}
               </td>
             </tr>

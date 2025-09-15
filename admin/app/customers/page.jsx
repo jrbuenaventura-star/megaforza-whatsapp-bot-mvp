@@ -1,17 +1,22 @@
-import { apiGet } from "@/lib/api";
+export const dynamic = 'force-dynamic';
+
+import { apiGet } from '@/lib/api';
+
+async function getData() {
+  // usa los helpers (ellos ya anteponen /api)
+  return apiGet('/customers');
+}
 
 export default async function Page() {
-  // Trae clientes desde el backend (usa NEXT_PUBLIC_API_BASE internamente)
-  const data = await apiGet("/customers");
+  const data = await getData();
 
   return (
-    <div style={{ padding: 16 }}>
+    <div>
       <h1>Clientes</h1>
-
       <table
         border="1"
         cellPadding="8"
-        style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
+        style={{ borderCollapse: 'collapse', width: '100%', background: '#fff' }}
       >
         <thead>
           <tr>
@@ -25,31 +30,21 @@ export default async function Page() {
           </tr>
         </thead>
         <tbody>
-          {Array.isArray(data) && data.length > 0 ? (
-            data.map((row) => (
-              <tr key={row.id}>
-                <td>{row?.name ?? ""}</td>
-                <td>{row?.doc_type ?? ""}</td>
-                <td>{row?.doc_number ?? ""}</td>
-                <td>{row?.billing_email ?? ""}</td>
-                <td>{row?.whatsapp_phone ?? ""}</td>
-                <td>{Number(row?.discount_pct ?? 0)}%</td>
-                <td>
-                  {row?.created_at
-                    ? new Date(row.created_at).toLocaleString("es-CO", {
-                        timeZone: "America/Bogota",
-                      })
-                    : ""}
-                </td>
-              </tr>
-            ))
-          ) : (
-            <tr>
-              <td colSpan={7} style={{ textAlign: "center" }}>
-                Sin resultados
+          {Array.isArray(data) && data.map((row, idx) => (
+            <tr key={row.id ?? idx}>
+              <td>{row?.name ?? ''}</td>
+              <td>{row?.doc_type ?? ''}</td>
+              <td>{row?.doc_number ?? ''}</td>
+              <td>{row?.billing_email ?? ''}</td>
+              <td>{row?.whatsapp_phone ?? ''}</td>
+              <td>{row?.discount_pct ?? ''}</td>
+              <td>
+                {row?.created_at
+                  ? new Date(row.created_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
+                  : ''}
               </td>
             </tr>
-          )}
+          ))}
         </tbody>
       </table>
     </div>

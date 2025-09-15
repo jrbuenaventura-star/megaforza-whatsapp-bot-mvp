@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { apiGet } from '@/lib/api';
 
 async function getData() {
-  return apiGet('/customers'); // el helper ya antepone /api
+  return apiGet('/customers');
 }
 
 export default async function Page() {

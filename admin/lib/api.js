@@ -59,6 +59,11 @@ export function apiPatch(path, body) {
     body: JSON.stringify(body || {}),
   });
 }
-
+export function apiPost(path, body) {
+  return api(`/api${path}`, {
+    method: 'POST',
+    body: JSON.stringify(body || {}),
+  });
+}
 // (opcional) exportar la base para debug en /debug/env si quieres mostrarla
 export const API_ORIGIN = API_BASE;

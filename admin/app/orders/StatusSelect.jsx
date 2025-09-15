@@ -1,9 +1,10 @@
 'use client';
 
+import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { useTransition } from 'react';
-import { apiPatch } from '../../lib/api';
+import { apiPatch } from '@/lib/api';
 
+// Estados canónicos que entiende el backend
 const OPTIONS = [
   'pending_payment',
   'processing',
@@ -12,24 +13,32 @@ const OPTIONS = [
   'canceled',
 ];
 
-export default function StatusSelect({ id, value }) {
-  const router = useRouter();
+export default function StatusSelect({ order }) {
+  const [value, setValue] = useState(order.status);
   const [isPending, startTransition] = useTransition();
+  const router = useRouter();
 
   async function onChange(e) {
-    const status = e.target.value;
+    const next = e.target.value;
+    const prev = value;
+    setValue(next); // optimista
+
     try {
-      await apiPatch(`/orders/${id}`, { status });
+      await apiPatch(`/orders/${order.id}`, { status: next });
+      // refresca la tabla SSR para que quede consistente
       startTransition(() => router.refresh());
     } catch (err) {
-      alert('No se pudo actualizar el estado: ' + (err?.message || ''));
+      alert(`Error actualizando: ${err.message}`);
+      setValue(prev); // rollback
     }
   }
 
   return (
     <select value={value} onChange={onChange} disabled={isPending}>
-      {OPTIONS.map(s => (
-        <option key={s} value={s}>{s}</option>
+      {OPTIONS.map((s) => (
+        <option key={s} value={s}>
+          {s}
+        </option>
       ))}
     </select>
   );

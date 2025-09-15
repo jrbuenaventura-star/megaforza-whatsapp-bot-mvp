@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPatch } from '../../lib/api';
+export const dynamic = 'force-dynamic';
 
-// Estados que usará la UI (canónicos)
+import { useEffect, useMemo, useState } from 'react';
+import { apiGet, apiPatch } from '@/lib/api';
+
+// Estados canónicos que ve el usuario
 const CANON_OPTIONS = [
   'pending_payment',
   'processing',
@@ -12,24 +14,23 @@ const CANON_OPTIONS = [
   'canceled',
 ];
 
-// Mapeo DB -> canónico (lo que viene del backend)
+// Mapeo de estados de BD -> canónicos para mostrar en el <select>
 const DB_TO_CANON = {
   in_production: 'processing',
   scheduled: 'ready',
 };
 
-// (opcional) etiquetas bonitas
 const LABELS = {
   pending_payment: 'Pendiente de pago',
   processing: 'En producción',
-  ready: 'Programado/ Listo',
+  ready: 'Programado / Listo',
   delivered: 'Entregado',
   canceled: 'Cancelado',
 };
 
 function statusDbToCanon(db) {
   if (!db) return '';
-  return DB_TO_CANON[db] || db; // si no está en el mapa, ya es canónico
+  return DB_TO_CANON[db] || db;
 }
 
 function formatCOP(n) {
@@ -43,7 +44,7 @@ function formatCOP(n) {
 export default function OrdersPage() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(null); // order_id que se está guardando (para deshabilitar el select)
+  const [saving, setSaving] = useState(null); // order_id que se está guardando
 
   // Carga inicial
   useEffect(() => {
@@ -60,18 +61,16 @@ export default function OrdersPage() {
     })();
   }, []);
 
-  // Maneja cambio de estado
+  // Cambiar estado
   async function onChangeStatus(orderId, nextCanon) {
     try {
       setSaving(orderId);
-      // PATCH /api/orders/:id con un estado canónico (paid/ready/etc)
+      // PATCH /api/orders/:id con un estado canónico
       const updated = await apiPatch(`/orders/${orderId}`, { status: nextCanon });
-      // El backend responde con el estado "real" de BD (p.ej. in_production, scheduled)
-      const canon = statusDbToCanon(updated.status);
 
-      // Actualiza en memoria
+      // Actualiza en memoria con el estado real de BD que devuelve el backend
       setOrders((prev) =>
-        prev.map((o) => (o.id === orderId ? { ...o, status: updated.status } : o))
+        prev.map((o) => (o.id === orderId ? { ...o, status: updated.status } : o)),
       );
     } catch (e) {
       console.error(e);
@@ -81,11 +80,12 @@ export default function OrdersPage() {
     }
   }
 
+  // Filas con el estado canónico derivado
   const rows = useMemo(() => {
-    return orders.map((o) => {
-      const canon = statusDbToCanon(o.status);
-      return { ...o, _canonStatus: canon };
-    });
+    return (orders || []).map((o) => ({
+      ...o,
+      _canonStatus: statusDbToCanon(o.status),
+    }));
   }, [orders]);
 
   return (
@@ -130,7 +130,6 @@ export default function OrdersPage() {
                         </option>
                       ))}
                     </select>
-                    {/* Muestra el valor real de BD en pequeñito por transparencia */}
                     <div className="text-[11px] text-gray-500">
                       BD: <code>{o.status}</code>
                     </div>
@@ -149,67 +148,6 @@ export default function OrdersPage() {
           </table>
         </div>
       )}
-    </div>
-  );
-}
-export const dynamic = 'force-dynamic';
-
-import { apiGet } from '@/lib/api';
-import StatusSelect from './StatusSelect';
-
-async function getOrders() {
-  return apiGet('/orders');
-}
-
-function fmt(dt) {
-  if (!dt) return '';
-  try {
-    return new Date(dt).toLocaleString('es-CO', { timeZone: 'America/Bogota' });
-  } catch {
-    return String(dt);
-  }
-}
-
-export default async function Page() {
-  const orders = await getOrders();
-
-  return (
-    <div>
-      <h1>Pedidos</h1>
-      <table
-        border="1"
-        cellPadding="8"
-        style={{ borderCollapse: 'collapse', width: '100%', background: '#fff' }}
-      >
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Cliente</th>
-            <th>Estado</th>
-            <th>Bultos</th>
-            <th>Total</th>
-            <th>Programado</th>
-            <th>Listo</th>
-          </tr>
-        </thead>
-        <tbody>
-          {Array.isArray(orders) &&
-            orders.map((o) => (
-              <tr key={o.id}>
-                <td>{o.id?.slice(0, 8)}</td>
-                <td>{o.customer?.name ?? ''}</td>
-                <td>
-                  {/* componente cliente para editar estado */}
-                  <StatusSelect orderId={o.id} value={o.status} />
-                </td>
-                <td>{o.total_bags ?? 0}</td>
-                <td>{o.total ?? ''}</td>
-                <td>{fmt(o.scheduled_at)}</td>
-                <td>{fmt(o.ready_at)}</td>
-              </tr>
-            ))}
-        </tbody>
-      </table>
     </div>
   );
 }

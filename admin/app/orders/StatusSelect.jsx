@@ -1,15 +1,15 @@
 'use client';
 
-import { useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { apiPatch } from '@/lib/api';
+import { useTransition } from 'react';
+import { apiPatch } from '../../lib/api';
 
 const OPTIONS = [
-  { v: 'pending_payment', l: 'pending_payment' },
-  { v: 'processing',      l: 'processing' },
-  { v: 'ready',           l: 'ready' },
-  { v: 'delivered',       l: 'delivered' },
-  { v: 'canceled',        l: 'canceled' },
+  'pending_payment',
+  'processing',
+  'ready',
+  'delivered',
+  'canceled',
 ];
 
 export default function StatusSelect({ id, value }) {
@@ -20,17 +20,16 @@ export default function StatusSelect({ id, value }) {
     const status = e.target.value;
     try {
       await apiPatch(`/orders/${id}`, { status });
-      startTransition(() => router.refresh()); // refetch de la tabla
+      startTransition(() => router.refresh());
     } catch (err) {
-      console.error('PATCH /orders/:id', err);
-      alert('No se pudo actualizar el estado');
+      alert('No se pudo actualizar el estado: ' + (err?.message || ''));
     }
   }
 
   return (
-    <select defaultValue={value} onChange={onChange} disabled={isPending}>
-      {OPTIONS.map(o => (
-        <option key={o.v} value={o.v}>{o.l}</option>
+    <select value={value} onChange={onChange} disabled={isPending}>
+      {OPTIONS.map(s => (
+        <option key={s} value={s}>{s}</option>
       ))}
     </select>
   );

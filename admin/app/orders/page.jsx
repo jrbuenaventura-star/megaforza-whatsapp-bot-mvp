@@ -1,68 +1,23 @@
-<<<<<<< HEAD
-// admin/app/orders/page.jsx
-export const dynamic = 'force-dynamic'; // que no se prerenderice en build
+export const dynamic = 'force-dynamic';
 
-import { apiGet, apiPatch } from '@/lib/api';
+import { apiGet } from '../../lib/api';
+import StatusSelect from './StatusSelect';
 
-// --- Componente CLIENTE solo para el <select> ---
-function StatusSelect({ id, value }) {
-  'use client';
-  import { useRouter } from 'next/navigation';
-  import { useTransition } from 'react';
-  const router = useRouter();
-  const [isPending, startTransition] = useTransition();
-
-  const options = [
-    'pending_payment',
-    'processing',
-    'ready',
-    'delivered',
-    'canceled',
-  ];
-
-  async function onChange(e) {
-    const status = e.target.value;
-    try {
-      await apiPatch(`/orders/${id}`, { status });
-      // refresca los datos del server component
-      startTransition(() => router.refresh());
-    } catch (err) {
-      alert(`Error actualizando: ${err.message}`);
-    }
-  }
-
-  return (
-    <select disabled={isPending} defaultValue={value} onChange={onChange}>
-      {options.map((opt) => (
-        <option key={opt} value={opt}>
-          {opt}
-        </option>
-      ))}
-    </select>
-  );
+function fmt(dt) {
+  return dt
+    ? new Date(dt).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
+    : '';
 }
 
-// --- Página SERVER que trae la lista desde el backend ---
-async function getOrders() {
-  // apiGet agrega /api al path y usa NEXT_PUBLIC_API_BASE
+async function getData() {
+  // Trae todas las órdenes con cliente e items (tu API ya lo hace)
   return apiGet('/orders');
 }
 
 export default async function Page() {
-  const orders = await getOrders();
+  const orders = await getData();
 
   return (
-=======
-export const dynamic = 'force-dynamic';
-
-import StatusSelect from './StatusSelect';
-import { apiGet } from '@/lib/api';
-
-export default async function Page() {
-  const orders = await apiGet('/orders'); // Array de órdenes
-
-  return (
->>>>>>> 7518f13 (fix(admin): 'use client' primero y StatusSelect como componente cliente separado)
     <div>
       <h1>Pedidos</h1>
       <table
@@ -82,37 +37,15 @@ export default async function Page() {
           </tr>
         </thead>
         <tbody>
-<<<<<<< HEAD
-          {orders.map((o) => (
-            <tr key={o.id}>
-              <td>{o.id.slice(0, 8)}</td>
-              <td>{o.customer?.name ?? ''}</td>
-              <td><StatusSelect id={o.id} value={o.status} /></td>
-              <td>{o.total_bags}</td>
-              <td>{Number(o.total).toLocaleString('es-CO')}</td>
-              <td>
-                {o.scheduled_at
-                  ? new Date(o.scheduled_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
-                  : ''}
-              </td>
-              <td>
-                {o.ready_at
-                  ? new Date(o.ready_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
-                  : ''}
-              </td>
-=======
           {Array.isArray(orders) && orders.map((o) => (
             <tr key={o.id}>
-              <td>{o.id?.slice(0,8)}</td>
+              <td>{o.id?.slice(0, 8)}</td>
               <td>{o.customer?.name ?? ''}</td>
-              <td>
-                <StatusSelect id={o.id} value={o.status} />
-              </td>
-              <td>{o.total_bags ?? ''}</td>
-              <td>{o.total ?? ''}</td>
-              <td>{o.scheduled_at ? new Date(o.scheduled_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : ''}</td>
-              <td>{o.ready_at ? new Date(o.ready_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : ''}</td>
->>>>>>> 7518f13 (fix(admin): 'use client' primero y StatusSelect como componente cliente separado)
+              <td><StatusSelect id={o.id} value={o.status} /></td>
+              <td>{o.total_bags ?? 0}</td>
+              <td>{o.total ?? 0}</td>
+              <td>{fmt(o.scheduled_at)}</td>
+              <td>{fmt(o.ready_at)}</td>
             </tr>
           ))}
         </tbody>

@@ -38,3 +38,30 @@ export default async function Page() {
     </div>
   );
 }
+export const dynamic = 'force-dynamic';
+
+import { apiGet } from '@/lib/api';
+
+async function getConfig() {
+  return apiGet('/config/capacity');
+}
+
+export default async function Page() {
+  const cfg = await getConfig();
+
+  return (
+    <div>
+      <h1>Capacidad y Horarios</h1>
+      <pre
+        style={{
+          background: '#f5f5f5',
+          padding: '16px',
+          borderRadius: '8px',
+          overflowX: 'auto',
+        }}
+      >
+        {JSON.stringify(cfg, null, 2)}
+      </pre>
+    </div>
+  );
+}

@@ -1,152 +1,122 @@
-export const dynamic = 'force-dynamic';
+"use client";
 
-import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPatch } from '@/lib/api';
+import { useEffect, useState, useMemo } from "react";
+import { apiGet, apiPatch } from "@/lib/api";
 
-// Estados canónicos que ve el usuario
-const CANON_OPTIONS = [
-  'pending_payment',
-  'processing',
-  'ready',
-  'delivered',
-  'canceled',
+// Opciones de estado que verá el usuario
+const STATUS_OPTIONS = [
+  { value: "pending_payment", label: "Pendiente de pago" },
+  { value: "processing", label: "En proceso" },
+  { value: "ready", label: "Listo / Programado" },
+  { value: "delivered", label: "Entregado" },
+  { value: "canceled", label: "Cancelado" },
 ];
 
-// Mapeo de estados de BD -> canónicos para mostrar en el <select>
-const DB_TO_CANON = {
-  in_production: 'processing',
-  scheduled: 'ready',
-};
-
-const LABELS = {
-  pending_payment: 'Pendiente de pago',
-  processing: 'En producción',
-  ready: 'Programado / Listo',
-  delivered: 'Entregado',
-  canceled: 'Cancelado',
-};
-
-function statusDbToCanon(db) {
-  if (!db) return '';
-  return DB_TO_CANON[db] || db;
+function fmtBogota(dt) {
+  if (!dt) return "";
+  try {
+    const d = typeof dt === "string" ? new Date(dt) : dt;
+    return d.toLocaleString("es-CO", { timeZone: "America/Bogota" });
+  } catch {
+    return "";
+  }
 }
 
-function formatCOP(n) {
-  return Number(n || 0).toLocaleString('es-CO', {
-    style: 'currency',
-    currency: 'COP',
-    maximumFractionDigits: 0,
-  });
-}
-
-export default function OrdersPage() {
+export default function Page() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(null); // order_id que se está guardando
+  const [err, setErr] = useState(null);
 
-  // Carga inicial
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await apiGet('/orders'); // GET /api/orders
-        setOrders(data);
-      } catch (e) {
-        console.error(e);
-        alert('No pude cargar pedidos.');
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
-
-  // Cambiar estado
-  async function onChangeStatus(orderId, nextCanon) {
+  async function load() {
+    setLoading(true);
     try {
-      setSaving(orderId);
-      // PATCH /api/orders/:id con un estado canónico
-      const updated = await apiPatch(`/orders/${orderId}`, { status: nextCanon });
-
-      // Actualiza en memoria con el estado real de BD que devuelve el backend
-      setOrders((prev) =>
-        prev.map((o) => (o.id === orderId ? { ...o, status: updated.status } : o)),
-      );
+      // ¡Importante! usamos el helper con path SIN /api
+      const data = await apiGet("/orders");
+      setOrders(Array.isArray(data) ? data : []);
+      setErr(null);
     } catch (e) {
-      console.error(e);
-      alert('Error actualizando estado');
+      setErr(e?.message || "Error cargando pedidos");
     } finally {
-      setSaving(null);
+      setLoading(false);
     }
   }
 
-  // Filas con el estado canónico derivado
-  const rows = useMemo(() => {
-    return (orders || []).map((o) => ({
-      ...o,
-      _canonStatus: statusDbToCanon(o.status),
-    }));
-  }, [orders]);
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function onChangeStatus(id, next) {
+    // Optimistic UI
+    const prev = orders;
+    setOrders((curr) => curr.map((o) => (o.id === id ? { ...o, status: next } : o)));
+    try {
+      await apiPatch(`/orders/${id}`, { status: next });
+    } catch (e) {
+      alert(`Error actualizando estado: ${e?.message || e}`);
+      // rollback
+      setOrders(prev);
+    }
+  }
+
+  const totalPedidos = useMemo(() => orders.length, [orders]);
 
   return (
-    <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Pedidos</h1>
+    <div>
+      <h1>Pedidos</h1>
 
-      {loading ? (
-        <div>Cargando…</div>
-      ) : rows.length === 0 ? (
-        <div>No hay pedidos.</div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-[900px] w-full border border-gray-200">
-            <thead className="bg-gray-50">
-              <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left [&>th]:text-sm [&>th]:font-medium">
-                <th>Pedido</th>
-                <th>Cliente</th>
-                <th>Bultos</th>
-                <th>Total</th>
-                <th>Estado</th>
-                <th>Creado</th>
-                <th>Listo/Programado</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((o) => (
-                <tr key={o.id} className="border-t border-gray-200 [&>td]:px-3 [&>td]:py-2">
-                  <td className="font-mono text-xs">{o.id.slice(0, 8)}</td>
-                  <td>{o.customer?.name || o.customer_id}</td>
-                  <td>{o.total_bags}</td>
-                  <td>{formatCOP(o.total)}</td>
-                  <td>
-                    <select
-                      className="border rounded px-2 py-1 text-sm"
-                      value={o._canonStatus}
-                      disabled={saving === o.id}
-                      onChange={(e) => onChangeStatus(o.id, e.target.value)}
-                    >
-                      {CANON_OPTIONS.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {LABELS[opt] || opt}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="text-[11px] text-gray-500">
-                      BD: <code>{o.status}</code>
-                    </div>
-                  </td>
-                  <td>{new Date(o.created_at).toLocaleString('es-CO')}</td>
-                  <td>
-                    {o.ready_at
-                      ? new Date(o.ready_at).toLocaleString('es-CO')
-                      : o.scheduled_at
-                      ? new Date(o.scheduled_at).toLocaleString('es-CO')
-                      : '—'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {loading && <p>Cargando…</p>}
+      {err && (
+        <p style={{ color: "crimson" }}>
+          {String(err)}{" "}
+          <button onClick={load} style={{ marginLeft: 8 }}>
+            Reintentar
+          </button>
+        </p>
       )}
+
+      <p style={{ opacity: 0.8 }}>Total: {totalPedidos}</p>
+
+      <table
+        border="1"
+        cellPadding="8"
+        style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
+      >
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Cliente</th>
+            <th>Estado</th>
+            <th>Bultos</th>
+            <th>Total</th>
+            <th>Programado</th>
+            <th>Listo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.map((o) => (
+            <tr key={o.id}>
+              <td style={{ fontFamily: "monospace" }}>{o.id.slice(0, 8)}</td>
+              <td>{o.customer?.name ?? ""}</td>
+              <td>
+                <select
+                  value={o.status}
+                  onChange={(e) => onChangeStatus(o.id, e.target.value)}
+                >
+                  {STATUS_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </td>
+              <td>{o.total_bags}</td>
+              <td>{Number(o.total || 0).toLocaleString("es-CO")}</td>
+              <td>{fmtBogota(o.scheduled_at)}</td>
+              <td>{fmtBogota(o.ready_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
-EOF

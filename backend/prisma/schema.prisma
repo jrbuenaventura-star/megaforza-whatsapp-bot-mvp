@@ -97,6 +97,7 @@ model CapacityConfig {
   workday_start       String @default("08:00")
   workday_end         String @default("17:00")
   workdays            String @default("Mon,Tue,Wed,Thu,Fri,Sat")
+  day_hours_json Json? // { Mon:{start:"08:00",end:"17:00"}, Sat:{start:"08:00",end:"13:00"}, ... }
   timezone            String @default("America/Bogota")
   dispatch_buffer_min Int    @default(60)
 }

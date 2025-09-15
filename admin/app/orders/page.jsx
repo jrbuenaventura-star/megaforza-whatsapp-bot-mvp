@@ -1,154 +1,131 @@
-'use client';
+"use client";
 
-import { useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPatch } from '../../lib/api';
+import { useEffect, useState } from "react";
+import { apiGet, apiPatch } from "@/lib/api";
 
-// Estados que usará la UI (canónicos)
-const CANON_OPTIONS = [
-  'pending_payment',
-  'processing',
-  'ready',
-  'delivered',
-  'canceled',
+const STATUS_OPTIONS = [
+  { value: "pending_payment", label: "Pendiente pago" },
+  { value: "processing",      label: "En producción" },
+  { value: "ready",           label: "Listo/Programado" },
+  { value: "delivered",       label: "Entregado" },
+  { value: "canceled",        label: "Cancelado" },
 ];
 
-// Mapeo DB -> canónico (lo que viene del backend)
-const DB_TO_CANON = {
-  in_production: 'processing',
-  scheduled: 'ready',
-};
-
-// (opcional) etiquetas bonitas
-const LABELS = {
-  pending_payment: 'Pendiente de pago',
-  processing: 'En producción',
-  ready: 'Programado/ Listo',
-  delivered: 'Entregado',
-  canceled: 'Cancelado',
-};
-
-function statusDbToCanon(db) {
-  if (!db) return '';
-  return DB_TO_CANON[db] || db; // si no está en el mapa, ya es canónico
-}
-
-function formatCOP(n) {
-  return Number(n || 0).toLocaleString('es-CO', {
-    style: 'currency',
-    currency: 'COP',
-    maximumFractionDigits: 0,
-  });
+function fmtCOP(n) {
+  try {
+    return Number(n).toLocaleString("es-CO", {
+      style: "currency",
+      currency: "COP",
+      maximumFractionDigits: 0,
+    });
+  } catch {
+    return n;
+  }
 }
 
 export default function OrdersPage() {
-  const [orders, setOrders] = useState([]);
+  const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(null); // order_id que se está guardando (para deshabilitar el select)
+  const [savingId, setSavingId] = useState(null);
+  const [error, setError] = useState("");
 
-  // Carga inicial
   useEffect(() => {
-    (async () => {
-      try {
-        const data = await apiGet('/orders'); // GET /api/orders
-        setOrders(data);
-      } catch (e) {
-        console.error(e);
-        alert('No pude cargar pedidos.');
-      } finally {
-        setLoading(false);
-      }
-    })();
+    load();
   }, []);
 
-  // Maneja cambio de estado
-  async function onChangeStatus(orderId, nextCanon) {
+  async function load() {
+    setLoading(true);
+    setError("");
     try {
-      setSaving(orderId);
-      // PATCH /api/orders/:id con un estado canónico (paid/ready/etc)
-      const updated = await apiPatch(`/orders/${orderId}`, { status: nextCanon });
-      // El backend responde con el estado "real" de BD (p.ej. in_production, scheduled)
-      const canon = statusDbToCanon(updated.status);
-
-      // Actualiza en memoria
-      setOrders((prev) =>
-        prev.map((o) => (o.id === orderId ? { ...o, status: updated.status } : o))
-      );
+      const data = await apiGet("/orders"); // GET /api/orders en tu backend
+      setRows(Array.isArray(data) ? data : []);
     } catch (e) {
-      console.error(e);
-      alert('Error actualizando estado');
+      setError(e?.message || "No se pudo cargar órdenes");
     } finally {
-      setSaving(null);
+      setLoading(false);
     }
   }
 
-  const rows = useMemo(() => {
-    return orders.map((o) => {
-      const canon = statusDbToCanon(o.status);
-      return { ...o, _canonStatus: canon };
-    });
-  }, [orders]);
+  async function changeStatus(id, newStatus) {
+    setError("");
+    setSavingId(id);
+
+    // Optimistic UI
+    const prev = rows;
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, status: newStatus } : r)));
+
+    try {
+      const updated = await apiPatch(`/orders/${id}`, { status: newStatus }); // PATCH /api/orders/:id
+      // Ajusta a lo que devuelva el backend (canónico/sinónimos)
+      setRows((rs) => rs.map((r) => (r.id === id ? { ...r, status: updated.status } : r)));
+    } catch (e) {
+      setError(`No se pudo actualizar: ${e?.message || "Error"}`);
+      setRows(prev); // revertir
+    } finally {
+      setSavingId(null);
+    }
+  }
 
   return (
-    <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Pedidos</h1>
+    <div style={{ padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
+      <h1 style={{ fontSize: 22, marginBottom: 12 }}>Órdenes</h1>
+
+      {error ? (
+        <div style={{ marginBottom: 12, color: "#b91c1c" }}>{error}</div>
+      ) : null}
 
       {loading ? (
         <div>Cargando…</div>
-      ) : rows.length === 0 ? (
-        <div>No hay pedidos.</div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-[900px] w-full border border-gray-200">
-            <thead className="bg-gray-50">
-              <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left [&>th]:text-sm [&>th]:font-medium">
-                <th>Pedido</th>
-                <th>Cliente</th>
-                <th>Bultos</th>
-                <th>Total</th>
-                <th>Estado</th>
-                <th>Creado</th>
-                <th>Listo/Programado</th>
+        <table
+          border={1}
+          cellPadding={8}
+          style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
+        >
+          <thead>
+            <tr style={{ background: "#f3f4f6" }}>
+              <th>ID</th>
+              <th>Cliente</th>
+              <th>Total (COP)</th>
+              <th>Estado</th>
+              <th>Creado</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((o) => (
+              <tr key={o.id}>
+                <td style={{ fontFamily: "monospace" }}>{o.id.slice(0, 8)}</td>
+                <td>{o.customer?.name || "—"}</td>
+                <td>{fmtCOP(o.total)}</td>
+                <td>
+                  <select
+                    value={o.status}
+                    onChange={(e) => changeStatus(o.id, e.target.value)}
+                    disabled={savingId === o.id}
+                  >
+                    {STATUS_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  {o.created_at
+                    ? new Date(o.created_at).toLocaleString("es-CO", { timeZone: "America/Bogota" })
+                    : "—"}
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {rows.map((o) => (
-                <tr key={o.id} className="border-t border-gray-200 [&>td]:px-3 [&>td]:py-2">
-                  <td className="font-mono text-xs">{o.id.slice(0, 8)}</td>
-                  <td>{o.customer?.name || o.customer_id}</td>
-                  <td>{o.total_bags}</td>
-                  <td>{formatCOP(o.total)}</td>
-                  <td>
-                    <select
-                      className="border rounded px-2 py-1 text-sm"
-                      value={o._canonStatus}
-                      disabled={saving === o.id}
-                      onChange={(e) => onChangeStatus(o.id, e.target.value)}
-                    >
-                      {CANON_OPTIONS.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {LABELS[opt] || opt}
-                        </option>
-                      ))}
-                    </select>
-                    {/* Muestra el valor real de BD en pequeñito por transparencia */}
-                    <div className="text-[11px] text-gray-500">
-                      BD: <code>{o.status}</code>
-                    </div>
-                  </td>
-                  <td>{new Date(o.created_at).toLocaleString('es-CO')}</td>
-                  <td>
-                    {o.ready_at
-                      ? new Date(o.ready_at).toLocaleString('es-CO')
-                      : o.scheduled_at
-                      ? new Date(o.scheduled_at).toLocaleString('es-CO')
-                      : '—'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            ))}
+          </tbody>
+        </table>
       )}
+
+      <div style={{ marginTop: 12 }}>
+        <button onClick={load} disabled={loading || savingId}>
+          Recargar
+        </button>
+      </div>
     </div>
   );
 }

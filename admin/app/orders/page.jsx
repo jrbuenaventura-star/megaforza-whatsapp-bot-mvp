@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 // admin/app/orders/page.jsx
 export const dynamic = 'force-dynamic'; // que no se prerenderice en build
 
@@ -51,6 +52,17 @@ export default async function Page() {
   const orders = await getOrders();
 
   return (
+=======
+export const dynamic = 'force-dynamic';
+
+import StatusSelect from './StatusSelect';
+import { apiGet } from '@/lib/api';
+
+export default async function Page() {
+  const orders = await apiGet('/orders'); // Array de órdenes
+
+  return (
+>>>>>>> 7518f13 (fix(admin): 'use client' primero y StatusSelect como componente cliente separado)
     <div>
       <h1>Pedidos</h1>
       <table
@@ -70,6 +82,7 @@ export default async function Page() {
           </tr>
         </thead>
         <tbody>
+<<<<<<< HEAD
           {orders.map((o) => (
             <tr key={o.id}>
               <td>{o.id.slice(0, 8)}</td>
@@ -87,6 +100,19 @@ export default async function Page() {
                   ? new Date(o.ready_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
                   : ''}
               </td>
+=======
+          {Array.isArray(orders) && orders.map((o) => (
+            <tr key={o.id}>
+              <td>{o.id?.slice(0,8)}</td>
+              <td>{o.customer?.name ?? ''}</td>
+              <td>
+                <StatusSelect id={o.id} value={o.status} />
+              </td>
+              <td>{o.total_bags ?? ''}</td>
+              <td>{o.total ?? ''}</td>
+              <td>{o.scheduled_at ? new Date(o.scheduled_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : ''}</td>
+              <td>{o.ready_at ? new Date(o.ready_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : ''}</td>
+>>>>>>> 7518f13 (fix(admin): 'use client' primero y StatusSelect como componente cliente separado)
             </tr>
           ))}
         </tbody>

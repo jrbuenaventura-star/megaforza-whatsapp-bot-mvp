@@ -1,7 +1,10 @@
+<<<<<<< HEAD
 # Estás en la raíz del repo
 git checkout main
 
 cat > admin/app/capacity/page.jsx <<'EOF'
+=======
+>>>>>>> 7518f13 (fix(admin): 'use client' primero y StatusSelect como componente cliente separado)
 'use client';
 export const dynamic = 'force-dynamic';
 

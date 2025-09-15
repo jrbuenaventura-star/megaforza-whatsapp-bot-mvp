@@ -1,131 +1,96 @@
-"use client";
+// admin/app/orders/page.jsx
+export const dynamic = 'force-dynamic'; // que no se prerenderice en build
 
-import { useEffect, useState } from "react";
-import { apiGet, apiPatch } from "@/lib/api";
+import { apiGet, apiPatch } from '@/lib/api';
 
-const STATUS_OPTIONS = [
-  { value: "pending_payment", label: "Pendiente pago" },
-  { value: "processing",      label: "En producción" },
-  { value: "ready",           label: "Listo/Programado" },
-  { value: "delivered",       label: "Entregado" },
-  { value: "canceled",        label: "Cancelado" },
-];
+// --- Componente CLIENTE solo para el <select> ---
+function StatusSelect({ id, value }) {
+  'use client';
+  import { useRouter } from 'next/navigation';
+  import { useTransition } from 'react';
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
 
-function fmtCOP(n) {
-  try {
-    return Number(n).toLocaleString("es-CO", {
-      style: "currency",
-      currency: "COP",
-      maximumFractionDigits: 0,
-    });
-  } catch {
-    return n;
-  }
-}
+  const options = [
+    'pending_payment',
+    'processing',
+    'ready',
+    'delivered',
+    'canceled',
+  ];
 
-export default function OrdersPage() {
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  async function load() {
-    setLoading(true);
-    setError("");
+  async function onChange(e) {
+    const status = e.target.value;
     try {
-      const data = await apiGet("/orders"); // GET /api/orders en tu backend
-      setRows(Array.isArray(data) ? data : []);
-    } catch (e) {
-      setError(e?.message || "No se pudo cargar órdenes");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function changeStatus(id, newStatus) {
-    setError("");
-    setSavingId(id);
-
-    // Optimistic UI
-    const prev = rows;
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, status: newStatus } : r)));
-
-    try {
-      const updated = await apiPatch(`/orders/${id}`, { status: newStatus }); // PATCH /api/orders/:id
-      // Ajusta a lo que devuelva el backend (canónico/sinónimos)
-      setRows((rs) => rs.map((r) => (r.id === id ? { ...r, status: updated.status } : r)));
-    } catch (e) {
-      setError(`No se pudo actualizar: ${e?.message || "Error"}`);
-      setRows(prev); // revertir
-    } finally {
-      setSavingId(null);
+      await apiPatch(`/orders/${id}`, { status });
+      // refresca los datos del server component
+      startTransition(() => router.refresh());
+    } catch (err) {
+      alert(`Error actualizando: ${err.message}`);
     }
   }
 
   return (
-    <div style={{ padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
-      <h1 style={{ fontSize: 22, marginBottom: 12 }}>Órdenes</h1>
+    <select disabled={isPending} defaultValue={value} onChange={onChange}>
+      {options.map((opt) => (
+        <option key={opt} value={opt}>
+          {opt}
+        </option>
+      ))}
+    </select>
+  );
+}
 
-      {error ? (
-        <div style={{ marginBottom: 12, color: "#b91c1c" }}>{error}</div>
-      ) : null}
+// --- Página SERVER que trae la lista desde el backend ---
+async function getOrders() {
+  // apiGet agrega /api al path y usa NEXT_PUBLIC_API_BASE
+  return apiGet('/orders');
+}
 
-      {loading ? (
-        <div>Cargando…</div>
-      ) : (
-        <table
-          border={1}
-          cellPadding={8}
-          style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
-        >
-          <thead>
-            <tr style={{ background: "#f3f4f6" }}>
-              <th>ID</th>
-              <th>Cliente</th>
-              <th>Total (COP)</th>
-              <th>Estado</th>
-              <th>Creado</th>
+export default async function Page() {
+  const orders = await getOrders();
+
+  return (
+    <div>
+      <h1>Pedidos</h1>
+      <table
+        border="1"
+        cellPadding="8"
+        style={{ borderCollapse: 'collapse', width: '100%', background: '#fff' }}
+      >
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Cliente</th>
+            <th>Estado</th>
+            <th>Bultos</th>
+            <th>Total</th>
+            <th>Programado</th>
+            <th>Listo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.map((o) => (
+            <tr key={o.id}>
+              <td>{o.id.slice(0, 8)}</td>
+              <td>{o.customer?.name ?? ''}</td>
+              <td><StatusSelect id={o.id} value={o.status} /></td>
+              <td>{o.total_bags}</td>
+              <td>{Number(o.total).toLocaleString('es-CO')}</td>
+              <td>
+                {o.scheduled_at
+                  ? new Date(o.scheduled_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
+                  : ''}
+              </td>
+              <td>
+                {o.ready_at
+                  ? new Date(o.ready_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
+                  : ''}
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            {rows.map((o) => (
-              <tr key={o.id}>
-                <td style={{ fontFamily: "monospace" }}>{o.id.slice(0, 8)}</td>
-                <td>{o.customer?.name || "—"}</td>
-                <td>{fmtCOP(o.total)}</td>
-                <td>
-                  <select
-                    value={o.status}
-                    onChange={(e) => changeStatus(o.id, e.target.value)}
-                    disabled={savingId === o.id}
-                  >
-                    {STATUS_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                <td>
-                  {o.created_at
-                    ? new Date(o.created_at).toLocaleString("es-CO", { timeZone: "America/Bogota" })
-                    : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      <div style={{ marginTop: 12 }}>
-        <button onClick={load} disabled={loading || savingId}>
-          Recargar
-        </button>
-      </div>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

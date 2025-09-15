@@ -152,3 +152,64 @@ export default function OrdersPage() {
     </div>
   );
 }
+export const dynamic = 'force-dynamic';
+
+import { apiGet } from '@/lib/api';
+import StatusSelect from './StatusSelect';
+
+async function getOrders() {
+  return apiGet('/orders');
+}
+
+function fmt(dt) {
+  if (!dt) return '';
+  try {
+    return new Date(dt).toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+  } catch {
+    return String(dt);
+  }
+}
+
+export default async function Page() {
+  const orders = await getOrders();
+
+  return (
+    <div>
+      <h1>Pedidos</h1>
+      <table
+        border="1"
+        cellPadding="8"
+        style={{ borderCollapse: 'collapse', width: '100%', background: '#fff' }}
+      >
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Cliente</th>
+            <th>Estado</th>
+            <th>Bultos</th>
+            <th>Total</th>
+            <th>Programado</th>
+            <th>Listo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.isArray(orders) &&
+            orders.map((o) => (
+              <tr key={o.id}>
+                <td>{o.id?.slice(0, 8)}</td>
+                <td>{o.customer?.name ?? ''}</td>
+                <td>
+                  {/* componente cliente para editar estado */}
+                  <StatusSelect orderId={o.id} value={o.status} />
+                </td>
+                <td>{o.total_bags ?? 0}</td>
+                <td>{o.total ?? ''}</td>
+                <td>{fmt(o.scheduled_at)}</td>
+                <td>{fmt(o.ready_at)}</td>
+              </tr>
+            ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}

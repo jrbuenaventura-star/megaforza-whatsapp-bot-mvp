@@ -93,7 +93,12 @@ app.post("/webhook", async (req, res) => {
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
-
+    // Mostrar menú al saludar
+const bodyText = msg.text?.body?.trim().toLowerCase() || '';
+if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].includes(bodyText)) {
+  await sendMenu(from);
+  return res.sendStatus(200);
+}
     // ───────────── Cliente ─────────────
     let customer = await prisma.customer.findUnique({
       where: { whatsapp_phone: from },

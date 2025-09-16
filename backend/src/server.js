@@ -104,16 +104,20 @@ if (msg.type === 'interactive') {
     '';
 
   if (choiceId === 'PEDIR') {
-    // siguiente paso: decidir si ya es cliente o iniciar registro
-    await sendText(from, 'Perfecto. Vamos a validar tu cuenta…');
+  if (customer) {
+    await sendText(from, 'Perfecto. Ya te tengo identificado ✅. Abre el 🛍️ catálogo en WhatsApp y envía tu pedido.');
     return res.sendStatus(200);
   }
+  // Iniciar registro guiado (no es cliente)
+  sessions.set(from, { state: 'REG_NAME', draft: {} });
+  await sendText(from, 'Para registrarte, primero: ¿Cuál es tu *nombre o razón social*?');
+  return res.sendStatus(200);
+}
 
-  if (choiceId === 'AGENTE') {
-    // siguiente paso: notificar a representantes
-    await sendText(from, 'Te conecto con un representante ahora mismo.');
-    return res.sendStatus(200);
-  }
+if (choiceId === 'AGENTE') {
+  await sendText(from, 'Te conecto con un representante ahora mismo.');
+  return res.sendStatus(200);
+}
 
   // Si llega algo desconocido
   await sendText(from, 'No entendí tu selección. Escribe "menu" para ver opciones.');

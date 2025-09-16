@@ -9,6 +9,9 @@ import { sendText, sendMenu } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
+// Estado temporal de la conversación (por número de WhatsApp)
+const sessions = new Map(); // ej: sessions.set('573001234567', { state: 'REG_NAME', draft: {} })
+
 dotenv.config();
 
 const app = express();

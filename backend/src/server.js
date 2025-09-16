@@ -5,7 +5,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { prisma } from "./db.js";
 import { router as api } from "./routes.js";
-import { sendText } from "./wa.js";
+import { sendText, sendMenu } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 

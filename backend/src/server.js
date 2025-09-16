@@ -301,7 +301,7 @@ const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
 app.use("/api", api);
 
 // ───────────────────── Boot ─────────────────────
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Backend running on http://localhost:${port}`);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Backend running on http://0.0.0.0:${PORT}`);
 });

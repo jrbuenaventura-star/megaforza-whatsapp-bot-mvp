@@ -93,6 +93,29 @@ app.post("/webhook", async (req, res) => {
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
+    // Capturar clics del menú (botones interactivos)
+if (msg.type === 'interactive') {
+  const choiceId =
+    msg?.interactive?.button_reply?.id ||
+    msg?.interactive?.list_reply?.id ||
+    '';
+
+  if (choiceId === 'PEDIR') {
+    // siguiente paso: decidir si ya es cliente o iniciar registro
+    await sendText(from, 'Perfecto. Vamos a validar tu cuenta…');
+    return res.sendStatus(200);
+  }
+
+  if (choiceId === 'AGENTE') {
+    // siguiente paso: notificar a representantes
+    await sendText(from, 'Te conecto con un representante ahora mismo.');
+    return res.sendStatus(200);
+  }
+
+  // Si llega algo desconocido
+  await sendText(from, 'No entendí tu selección. Escribe "menu" para ver opciones.');
+  return res.sendStatus(200);
+}
     // Mostrar menú al saludar
 const bodyText = msg.text?.body?.trim().toLowerCase() || '';
 if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].includes(bodyText)) {

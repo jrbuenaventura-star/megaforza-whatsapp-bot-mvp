@@ -1,8 +1,9 @@
 export const dynamic = 'force-dynamic';
 
-import { apiGet } from '@/lib/api';
+import { apiGet } from '../../lib/api';
 
 async function getData() {
+  // El helper ya antepone /api y usa NEXT_PUBLIC_API_BASE cuando está definido
   return apiGet('/customers');
 }
 

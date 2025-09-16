@@ -232,6 +232,42 @@ const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
 
     // ───────────── Pedidos por TEXTO ─────────────
     const text = msg.text?.body?.trim() || "";
+    // Registro guiado (paso a paso)
+const session = sessions.get(from);
+if (msg.type === 'text' && session) {
+  const t = text;
+
+  if (session.state === 'REG_NAME') {
+    session.draft.name = t;
+    session.state = 'REG_TAX';
+    await sendText(from, 'Gracias. ¿Cuál es tu *NIT o cédula*?');
+    return res.sendStatus(200);
+  }
+
+  if (session.state === 'REG_TAX') {
+    session.draft.tax_id = t;
+    session.state = 'REG_EMAIL';
+    await sendText(from, 'Perfecto. ¿Cuál es tu *correo de facturación*?');
+    return res.sendStatus(200);
+  }
+
+  if (session.state === 'REG_EMAIL') {
+    session.draft.billing_email = t;
+
+    await prisma.customer.create({
+      data: {
+        name: session.draft.name,
+        whatsapp_phone: from,
+        tax_id: session.draft.tax_id,
+        billing_email: session.draft.billing_email,
+      },
+    });
+
+    sessions.delete(from);
+    await sendText(from, '¡Listo! Te registré ✅. Abre el 🛍️ *catálogo* y envía tu pedido cuando quieras.');
+    return res.sendStatus(200);
+  }
+}
     if (msg?.type === "text" && /[xX]\s*\d+/.test(text)) {
       const pairs = text.split(/[;\n]+/);
       const items = [];

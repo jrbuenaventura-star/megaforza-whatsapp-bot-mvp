@@ -99,4 +99,6 @@ model CapacityConfig {
   workdays            String @default("Mon,Tue,Wed,Thu,Fri,Sat")
   timezone            String @default("America/Bogota")
   dispatch_buffer_min Int    @default(60)
+  sat_start            String?  @default("08:00")
+  sat_end              String?  @default("12:00")
 }

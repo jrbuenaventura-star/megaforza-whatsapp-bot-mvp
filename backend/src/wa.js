@@ -16,6 +16,34 @@ export async function sendText(to, body){
     console.error("WA send error:", t);
   }
 }
+export async function sendMenu(to) {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneId = process.env.WHATSAPP_PHONE_ID;
+
+  await fetch(`https://graph.facebook.com/v21.0/${phoneId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: "¿Cómo te ayudo hoy?" },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "PEDIR",  title: "Hacer un pedido" } },
+            { type: "reply", reply: { id: "AGENTE", title: "Hablar con un representante" } },
+          ],
+        },
+      },
+    }),
+  });
+}
+
 // Enviar catálogo (multi-product)
 export async function sendCatalog(to, sections = []) {
   const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;

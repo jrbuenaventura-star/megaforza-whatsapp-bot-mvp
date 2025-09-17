@@ -110,6 +110,8 @@ if (msg.type === 'interactive') {
     msg?.interactive?.list_reply?.id ||
     '';
 
+  const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
+  
   if (choiceId === 'PEDIR') {
   if (customer) {
     await sendText(from, 'Perfecto. Ya te tengo identificado ✅. Abre el 🛍️ catálogo en WhatsApp y envía tu pedido.');

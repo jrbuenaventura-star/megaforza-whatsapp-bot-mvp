@@ -190,27 +190,35 @@ if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].inc
       const orderItemsData = [];
 
       for (const it of productItems) {
-        const p = pMap.get(it.product_retailer_id);
-        const qty = Number(it.quantity || 0);
-        if (!p || !qty) continue;
+  const p = pMap.get(it.product_retailer_id);
+  const qty = Number(it.quantity || 0);
+  if (!p || !qty) continue;
 
-        total_bags += qty;
-        const unit = Number(p.price_per_bag || 0);
-        const line_total = qty * unit * (1 - disc / 100);
+  // 1 tonelada = 40 bultos de 25 kg (detectado por sufijo -1T en el SKU)
+  const bagsPerUnit = String(p.sku || '').endsWith('-1T') ? 40 : 1;
 
-        enrichedForSchedule.push({
-          qty_bags: qty,
-          pelletized: !!p.pelletized,
-        });
-        orderItemsData.push({
-          product_id: p.id,
-          qty_bags: qty,
-          unit_price: unit,
-          discount_pct_applied: disc,
-          line_total,
-        });
-      }
+  // Capacidad total en "bultos equivalentes"
+  total_bags += qty * bagsPerUnit;
 
+  // Precio por unidad (bulto o tonelada según el producto)
+  const unit = Number(p.price_per_bag || 0);
+  const line_total = qty * unit * (1 - disc / 100);
+
+  // Para el scheduler, siempre enviar bultos equivalentes
+  enrichedForSchedule.push({
+    qty_bags: qty * bagsPerUnit,
+    pelletized: !!p.pelletized,
+  });
+
+  // Guardamos la línea con qty en bultos equivalentes para consistencia
+  orderItemsData.push({
+    product_id: p.id,
+    qty_bags: qty * bagsPerUnit,
+    unit_price: unit,
+    discount_pct_applied: disc,
+    line_total,
+  });
+}
       if (!orderItemsData.length) {
         await sendText(
           from,

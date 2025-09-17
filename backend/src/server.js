@@ -122,7 +122,23 @@ if (msg.type === 'interactive') {
 }
 
 if (choiceId === 'AGENTE') {
-  await sendText(from, 'Te conecto con un representante ahora mismo.');
+  const contactName = entry?.contacts?.[0]?.profile?.name || 'Cliente';
+
+  // Confirma al cliente
+  await sendText(from, 'Te conecto con un representante ahora mismo. Te escribirán en breve.');
+
+  // Notifica a tus agentes con link para escribirle desde su propio número
+  const link = `https://wa.me/${from}?text=${encodeURIComponent(
+    `Hola ${contactName}, soy del equipo de Megaforza. Vimos tu mensaje en WhatsApp.`
+  )}`;
+
+  for (const agent of AGENTS) {
+    await sendText(
+      agent,
+      `📞 *Nuevo chat*\nDe: ${contactName}\nNúmero: ${from}\nAbrir chat: ${link}`
+    );
+  }
+
   return res.sendStatus(200);
 }
 

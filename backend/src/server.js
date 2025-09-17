@@ -10,6 +10,11 @@ import { sendText, sendMenu } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
+const AGENTS = (process.env.AGENT_WHATSAPP_NUMBERS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 // Estado temporal de la conversación (por número de WhatsApp)
 const sessions = new Map(); // ej: sessions.set('573001234567', { state: 'REG_NAME', draft: {} })
 

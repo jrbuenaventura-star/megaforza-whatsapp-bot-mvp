@@ -97,10 +97,10 @@ export async function sendChoicesMenu(to) {
       type: "button",
       body: { text: "¿Qué te gustaría hacer?" },
       action: {
-        buttons: [
-          { type: "reply", reply: { id: "PEDIR",  title: "Hacer un pedido" } },
-          { type: "reply", reply: { id: "AGENTE", title: "Hablar con un representante" } }
-        ]
+      buttons: [
+      { type: "reply", reply: { id: "PEDIR",  title: "Hacer pedido" } },
+      { type: "reply", reply: { id: "AGENTE", title: "Hablar con agente" } },
+        ],
       }
     }
   };

@@ -128,7 +128,7 @@ if (choiceId === 'AGENTE') {
     // Mostrar menú al saludar
 const bodyText = msg.text?.body?.trim().toLowerCase() || '';
 if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].includes(bodyText)) {
-  await sendMenu(from);
+  await sendChoicesMenu(from);
   return res.sendStatus(200);
 }
     // ───────────── Cliente ─────────────

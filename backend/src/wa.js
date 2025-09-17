@@ -88,7 +88,7 @@ export async function sendCatalog(to, sections = []) {
 }
 // Envía el menú con 2 botones (PEDIR / AGENTE)
 export async function sendChoicesMenu(to) {
-  const url = `https://graph.facebook.com/v23.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const url = `https://graph.facebook.com/v23.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
   const body = {
     messaging_product: "whatsapp",
     to,
@@ -108,7 +108,7 @@ export async function sendChoicesMenu(to) {
   const r = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)

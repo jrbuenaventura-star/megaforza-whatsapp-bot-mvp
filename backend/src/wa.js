@@ -86,3 +86,36 @@ export async function sendCatalog(to, sections = []) {
   console.log("WA sendCatalog:", JSON.stringify(data));
   return data;
 }
+// Envía el menú con 2 botones (PEDIR / AGENTE)
+export async function sendChoicesMenu(to) {
+  const url = `https://graph.facebook.com/v23.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const body = {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: "¿Qué te gustaría hacer?" },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: "PEDIR",  title: "Hacer un pedido" } },
+          { type: "reply", reply: { id: "AGENTE", title: "Hablar con un representante" } }
+        ]
+      }
+    }
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!r.ok) {
+    const err = await r.text();
+    console.error("[WA SEND MENU ERROR]", r.status, err);
+  }
+}

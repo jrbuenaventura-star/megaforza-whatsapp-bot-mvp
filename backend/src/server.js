@@ -87,6 +87,7 @@ app.get("/webhook", (req, res) => {
 
 // ───────────────────── Webhook RECEIVE ─────────────────────
 app.post("/webhook", async (req, res) => {
+  console.log('[WEBHOOK IN]', JSON.stringify(req.body));
   try {
     const change = req.body.entry?.[0]?.changes?.[0];
     const entry = change?.value;

@@ -10,6 +10,13 @@ import { sendText, sendMenu, sendProductList } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
+function getSkuList(envKey) {
+  return (process.env[envKey] || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
 const AGENTS = (process.env.AGENT_WHATSAPP_NUMBERS || '')
   .split(',')
   .map(s => s.trim())

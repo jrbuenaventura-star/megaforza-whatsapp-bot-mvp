@@ -125,7 +125,7 @@ if (msg.type === 'interactive') {
   const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
   
   if (choiceId === 'PEDIR') {
-  // Si no es cliente, pide datos para registrarlo
+  // Si NO es cliente, pídeles datos para crear la cuenta
   if (!customer) {
     await sendText(
       from,
@@ -135,8 +135,8 @@ if (msg.type === 'interactive') {
   }
 
   // Es cliente → enviar listas agrupadas por presentación
-  const skus25 = getSkuList("WHATSAPP_SKUS_25KG");   // ej: "LEC-18,GAN-CEB,AVI,NUT-CER,EQU-16"
-  const skus1t  = getSkuList("WHATSAPP_SKUS_1T");    // ej: "AVI-1T"
+  const skus25 = getSkuList("WHATSAPP_SKUS_25KG");
+  const skus1t  = getSkuList("WHATSAPP_SKUS_1T");
 
   await sendText(
     from,
@@ -160,6 +160,9 @@ if (msg.type === 'interactive') {
       skus: skus1t,
     });
   }
+
+  return res.sendStatus(200);
+}
 
   return res.sendStatus(200);
 }

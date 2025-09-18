@@ -104,98 +104,140 @@ app.post("/webhook", async (req, res) => {
     const entry = change?.value;
     const msg = entry?.messages?.[0];
 
-    // No hay mensaje (p. ej., son solo statuses)
+    // No hay mensaje (solo statuses)
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
-    // Capturar clics del menú (botones interactivos)
-if (msg.type === 'interactive') {
-  const choiceId =
-    msg?.interactive?.button_reply?.id ||
-    msg?.interactive?.list_reply?.id ||
-    '';
 
-  const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
-  
-  if (choiceId === 'PEDIR') {
-  // Si NO es cliente, pídeles datos para crear la cuenta
-  if (!customer) {
-    await sendText(
-      from,
-      "Perfecto. Para crear tu cuenta envíanos: Nombre, NIT o Cédula y correo de facturación. Luego podrás adjuntar tu RUT y Cámara de Comercio (≤30 días)."
-    );
-    return res.sendStatus(200);
-  }
+    // ───────────── Respuestas INTERACTIVAS (botones/listas) ─────────────
+    if (msg.type === "interactive") {
+      const choiceId =
+        msg?.interactive?.button_reply?.id ||
+        msg?.interactive?.list_reply?.id ||
+        "";
 
-  // Es cliente → enviar listas agrupadas por presentación
-  const skus25 = getSkuList("WHATSAPP_SKUS_25KG");
-  const skus1t  = getSkuList("WHATSAPP_SKUS_1T");
+      const contactName = entry?.contacts?.[0]?.profile?.name || "Cliente";
+      const customer = await prisma.customer.findUnique({
+        where: { whatsapp_phone: from },
+      });
 
-  await sendText(
-    from,
-    "Elige tus productos por presentación. Abre la lista y usa el botón ➕ para agregar al carrito."
-  );
+      if (choiceId === "PEDIR") {
+        // Si NO es cliente → iniciar registro guiado
+        if (!customer) {
+          sessions.set(from, { state: "REG_NAME", draft: {} });
+          await sendText(
+            from,
+            "Perfecto. Para empezar, ¿cuál es tu *nombre o razón social*?"
+          );
+          return res.sendStatus(200);
+        }
 
-  if (skus25.length) {
-    await sendProductList(from, {
-      title: "Presentación: 25 kg",
-      body:  "Toca para ver opciones de 25 kg",
-      sectionTitle: "Bultos de 25 kg",
-      skus: skus25,
-      } catch (e) {
-  console.error(e);
-  return res.sendStatus(200);
-}
-    });
-  }
+        // Es cliente → enviar listas por presentación
+        const skus25 = getSkuList("WHATSAPP_SKUS_25KG");
+        const skus1t = getSkuList("WHATSAPP_SKUS_1T");
 
-  if (skus1t.length) {
-    await sendProductList(from, {
-      title: "Presentación: 1 tonelada",
-      body:  "Toca para ver opciones de 1 tonelada",
-      sectionTitle: "A granel (1T)",
-      skus: skus1t,
-    });
-  }
+        await sendText(
+          from,
+          "Elige tus productos por presentación. Abre la lista y usa ➕ para agregar al carrito."
+        );
 
-  return res.sendStatus(200);
-}
+        if (skus25.length) {
+          await sendProductList(from, {
+            title: "Presentación: 25 kg",
+            body: "Toca para ver opciones de 25 kg",
+            sectionTitle: "Bultos de 25 kg",
+            skus: skus25,
+          });
+        }
+        if (skus1t.length) {
+          await sendProductList(from, {
+            title: "Presentación: 1 tonelada",
+            body: "Toca para ver opciones de 1 tonelada",
+            sectionTitle: "A granel (1T)",
+            skus: skus1t,
+          });
+        }
+        return res.sendStatus(200);
+      }
 
-  return res.sendStatus(200);
-}
+      if (choiceId === "AGENTE") {
+        // Confirma al cliente
+        await sendText(
+          from,
+          "Te conecto con un representante ahora mismo. Te escribirán en breve."
+        );
 
-if (choiceId === 'AGENTE') {
-  const contactName = entry?.contacts?.[0]?.profile?.name || 'Cliente';
+        // Notifica a tus agentes con link para escribirle desde su propio número
+        const link = `https://wa.me/${from}?text=${encodeURIComponent(
+          `Hola ${contactName}, soy del equipo de Megaforza. Vimos tu mensaje en WhatsApp.`
+        )}`;
 
-  // Confirma al cliente
-  await sendText(from, 'Te conecto con un representante ahora mismo. Te escribirán en breve.');
+        for (const agent of AGENTS) {
+          await sendText(
+            agent,
+            `📞 *Nuevo chat*\nDe: ${contactName}\nNúmero: ${from}\nAbrir chat: ${link}`
+          );
+        }
 
-  // Notifica a tus agentes con link para escribirle desde su propio número
-  const link = `https://wa.me/${from}?text=${encodeURIComponent(
-    `Hola ${contactName}, soy del equipo de Megaforza. Vimos tu mensaje en WhatsApp.`
-  )}`;
+        return res.sendStatus(200);
+      }
 
-  for (const agent of AGENTS) {
-    await sendText(
-      agent,
-      `📞 *Nuevo chat*\nDe: ${contactName}\nNúmero: ${from}\nAbrir chat: ${link}`
-    );
-  }
+      await sendText(from, 'No entendí tu selección. Escribe "menu" para ver opciones.');
+      return res.sendStatus(200);
+    }
 
-  return res.sendStatus(200);
-}
+    // ───────────── Saludo → mostrar menú ─────────────
+    const bodyText = msg.text?.body?.trim().toLowerCase() || "";
+    if (
+      msg.type === "text" &&
+      ["hola", "menu", "hi", "help", "ayuda", "inicio"].includes(bodyText)
+    ) {
+      await sendChoicesMenu(from);
+      return res.sendStatus(200);
+    }
 
-  // Si llega algo desconocido
-  await sendText(from, 'No entendí tu selección. Escribe "menu" para ver opciones.');
-  return res.sendStatus(200);
-}
-    // Mostrar menú al saludar
-const bodyText = msg.text?.body?.trim().toLowerCase() || '';
-if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].includes(bodyText)) {
-  await sendChoicesMenu(from);
-  return res.sendStatus(200);
-}
-    // ───────────── Cliente ─────────────
+    // ───────────── Registro guiado (paso a paso) ─────────────
+    const session = sessions.get(from);
+    const text = msg.text?.body?.trim() || "";
+    if (msg.type === "text" && session) {
+      const t = text;
+
+      if (session.state === "REG_NAME") {
+        session.draft.name = t;
+        session.state = "REG_TAX";
+        await sendText(from, "Gracias. ¿Cuál es tu *NIT o cédula*?");
+        return res.sendStatus(200);
+      }
+
+      if (session.state === "REG_TAX") {
+        session.draft.tax_id = t;
+        session.state = "REG_EMAIL";
+        await sendText(from, "Perfecto. ¿Cuál es tu *correo de facturación*?");
+        return res.sendStatus(200);
+      }
+
+      if (session.state === "REG_EMAIL") {
+        session.draft.billing_email = t;
+
+        await prisma.customer.create({
+          data: {
+            name: session.draft.name,
+            whatsapp_phone: from,
+            tax_id: session.draft.tax_id,
+            billing_email: session.draft.billing_email,
+          },
+        });
+
+        sessions.delete(from);
+        await sendText(
+          from,
+          "¡Listo! Te registré ✅. Abre el 🛍️ *catálogo* y envía tu pedido cuando quieras."
+        );
+        return res.sendStatus(200);
+      }
+    }
+
+    // ───────────── Buscar cliente ─────────────
     let customer = await prisma.customer.findUnique({
       where: { whatsapp_phone: from },
     });
@@ -203,7 +245,7 @@ if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].inc
     if (!customer) {
       await sendText(
         from,
-        "¡Hola! Soy el asistente de Megaforza. Para crear tu cuenta envíanos: Nombre, NIT o Cédula y correo de facturación. Luego podrás adjuntar tu RUT y Certificado de Cámara de Comercio (≤30 días)."
+        '¡Hola! Soy el asistente de Megaforza. Escribe *menu* para registrarte o ver opciones.'
       );
       return res.sendStatus(200);
     }
@@ -231,35 +273,36 @@ if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].inc
       const orderItemsData = [];
 
       for (const it of productItems) {
-  const p = pMap.get(it.product_retailer_id);
-  const qty = Number(it.quantity || 0);
-  if (!p || !qty) continue;
+        const p = pMap.get(it.product_retailer_id);
+        const qty = Number(it.quantity || 0);
+        if (!p || !qty) continue;
 
-  // 1 tonelada = 40 bultos de 25 kg (detectado por sufijo -1T en el SKU)
-  const bagsPerUnit = String(p.sku || '').endsWith('-1T') ? 40 : 1;
+        // 1 tonelada = 40 bultos de 25 kg (detectado por sufijo -1T en el SKU)
+        const bagsPerUnit = String(p.sku || "").endsWith("-1T") ? 40 : 1;
 
-  // Capacidad total en "bultos equivalentes"
-  total_bags += qty * bagsPerUnit;
+        // Capacidad total en "bultos equivalentes"
+        total_bags += qty * bagsPerUnit;
 
-  // Precio por unidad (bulto o tonelada según el producto)
-  const unit = Number(p.price_per_bag || 0);
-  const line_total = qty * unit * (1 - disc / 100);
+        // Precio por unidad (bulto o tonelada según el producto)
+        const unit = Number(p.price_per_bag || 0);
+        const line_total = qty * unit * (1 - disc / 100);
 
-  // Para el scheduler, siempre enviar bultos equivalentes
-  enrichedForSchedule.push({
-    qty_bags: qty * bagsPerUnit,
-    pelletized: !!p.pelletized,
-  });
+        // Para el scheduler, siempre enviar bultos equivalentes
+        enrichedForSchedule.push({
+          qty_bags: qty * bagsPerUnit,
+          pelletized: !!p.pelletized,
+        });
 
-  // Guardamos la línea con qty en bultos equivalentes para consistencia
-  orderItemsData.push({
-    product_id: p.id,
-    qty_bags: qty * bagsPerUnit,
-    unit_price: unit,
-    discount_pct_applied: disc,
-    line_total,
-  });
-}
+        // Guardamos la línea con qty en bultos equivalentes para consistencia
+        orderItemsData.push({
+          product_id: p.id,
+          qty_bags: qty * bagsPerUnit,
+          unit_price: unit,
+          discount_pct_applied: disc,
+          line_total,
+        });
+      }
+
       if (!orderItemsData.length) {
         await sendText(
           from,
@@ -290,8 +333,8 @@ if (msg.type === 'text' && ['hola', 'menu', 'hi', 'help', 'ayuda', 'inicio'].inc
         },
       });
 
-const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
-const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
+      const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
+      const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
 
       await sendText(
         from,
@@ -301,47 +344,10 @@ const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
           `Por favor realiza el pago y envía el comprobante para confirmar.`
       );
 
-      return res.sendStatus(200); // ← evita caer al fallback
+      return res.sendStatus(200);
     }
 
-    // ───────────── Pedidos por TEXTO ─────────────
-    const text = msg.text?.body?.trim() || "";
-    // Registro guiado (paso a paso)
-const session = sessions.get(from);
-if (msg.type === 'text' && session) {
-  const t = text;
-
-  if (session.state === 'REG_NAME') {
-    session.draft.name = t;
-    session.state = 'REG_TAX';
-    await sendText(from, 'Gracias. ¿Cuál es tu *NIT o cédula*?');
-    return res.sendStatus(200);
-  }
-
-  if (session.state === 'REG_TAX') {
-    session.draft.tax_id = t;
-    session.state = 'REG_EMAIL';
-    await sendText(from, 'Perfecto. ¿Cuál es tu *correo de facturación*?');
-    return res.sendStatus(200);
-  }
-
-  if (session.state === 'REG_EMAIL') {
-    session.draft.billing_email = t;
-
-    await prisma.customer.create({
-      data: {
-        name: session.draft.name,
-        whatsapp_phone: from,
-        tax_id: session.draft.tax_id,
-        billing_email: session.draft.billing_email,
-      },
-    });
-
-    sessions.delete(from);
-    await sendText(from, '¡Listo! Te registré ✅. Abre el 🛍️ *catálogo* y envía tu pedido cuando quieras.');
-    return res.sendStatus(200);
-  }
-}
+    // ───────────── Pedidos por TEXTO (SKU x Cantidad) ─────────────
     if (msg?.type === "text" && /[xX]\s*\d+/.test(text)) {
       const pairs = text.split(/[;\n]+/);
       const items = [];
@@ -403,8 +409,8 @@ if (msg.type === 'text' && session) {
           },
         });
 
-const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
-const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
+        const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
+        const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
 
         await sendText(
           from,

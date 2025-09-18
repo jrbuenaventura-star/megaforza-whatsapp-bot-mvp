@@ -6,7 +6,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { prisma } from "./db.js";
 import { router as api } from "./routes.js";
-import { sendText, sendMenu } from "./wa.js";
+import { sendText, sendMenu, sendProductList } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
@@ -73,7 +73,12 @@ function etaTextBogotaNextDayIfAfter1630(dateLike) {
     hour12: false,
   }).format(outDate);
 }
-
+function getSkuList(envKey) {
+  return (process.env[envKey] || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+}
 /** Resuelve el enum de estado “pendiente de pago” de forma segura */
 function getSafePendingStatus() {
   const S = Prisma?.OrderStatus ?? OrderStatus ?? {};
@@ -113,13 +118,42 @@ if (msg.type === 'interactive') {
   const customer = await prisma.customer.findUnique({ where: { whatsapp_phone: from } });
   
   if (choiceId === 'PEDIR') {
-  if (customer) {
-    await sendText(from, 'Perfecto. Ya te tengo identificado ✅. Abre el 🛍️ catálogo en WhatsApp y envía tu pedido.');
+  // Si no es cliente, pide datos para registrarlo
+  if (!customer) {
+    await sendText(
+      from,
+      "Perfecto. Para crear tu cuenta envíanos: Nombre, NIT o Cédula y correo de facturación. Luego podrás adjuntar tu RUT y Cámara de Comercio (≤30 días)."
+    );
     return res.sendStatus(200);
   }
-  // Iniciar registro guiado (no es cliente)
-  sessions.set(from, { state: 'REG_NAME', draft: {} });
-  await sendText(from, 'Para registrarte, primero: ¿Cuál es tu *nombre o razón social*?');
+
+  // Es cliente → enviar listas agrupadas por presentación
+  const skus25 = getSkuList("WHATSAPP_SKUS_25KG");   // ej: "LEC-18,GAN-CEB,AVI,NUT-CER,EQU-16"
+  const skus1t  = getSkuList("WHATSAPP_SKUS_1T");    // ej: "AVI-1T"
+
+  await sendText(
+    from,
+    "Elige tus productos por presentación. Abre la lista y usa el botón ➕ para agregar al carrito."
+  );
+
+  if (skus25.length) {
+    await sendProductList(from, {
+      title: "Presentación: 25 kg",
+      body:  "Toca para ver opciones de 25 kg",
+      sectionTitle: "Bultos de 25 kg",
+      skus: skus25,
+    });
+  }
+
+  if (skus1t.length) {
+    await sendProductList(from, {
+      title: "Presentación: 1 tonelada",
+      body:  "Toca para ver opciones de 1 tonelada",
+      sectionTitle: "A granel (1T)",
+      skus: skus1t,
+    });
+  }
+
   return res.sendStatus(200);
 }
 

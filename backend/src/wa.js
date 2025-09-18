@@ -16,6 +16,50 @@ export async function sendText(to, body){
     console.error("WA send error:", t);
   }
 }
+// Envía una lista de productos (Multi-product message) desde el catálogo de Meta
+// Requiere: process.env.WHATSAPP_CATALOG_ID y WA_PHONE_NUMBER_ID (igual que sendText)
+export async function sendProductList(to, { title, body, sectionTitle, skus }) {
+  const url = `https://graph.facebook.com/v23.0/${process.env.WA_PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "product_list",
+      header: { type: "text", text: title || "Catálogo" },
+      body:   { text: body  || "Elige tus productos:" },
+      footer: { text: "Megaforza" },
+      action: {
+        catalog_id: process.env.WHATSAPP_CATALOG_ID,
+        sections: [
+          {
+            title: sectionTitle || "Productos",
+            product_items: (skus || []).map((sku) => ({
+              product_retailer_id: sku, // ← debe coincidir EXACTO con el SKU del catálogo
+            })),
+          },
+        ],
+      },
+    },
+  };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await resp.json();
+  if (!resp.ok) {
+    console.error("[WA SEND PRODUCT LIST ERROR]", resp.status, JSON.stringify(data));
+    throw new Error(`WA product_list error ${resp.status}`);
+  }
+  return data;
+}
 export async function sendMenu(to) {
   const token = process.env.WHATSAPP_TOKEN;
   const phoneId = process.env.WHATSAPP_PHONE_ID;

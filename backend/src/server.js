@@ -142,6 +142,10 @@ if (msg.type === 'interactive') {
       body:  "Toca para ver opciones de 25 kg",
       sectionTitle: "Bultos de 25 kg",
       skus: skus25,
+      } catch (e) {
+  console.error(e);
+  return res.sendStatus(200);
+}
     });
   }
 

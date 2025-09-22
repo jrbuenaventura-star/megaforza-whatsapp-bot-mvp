@@ -81,10 +81,8 @@ function toDbStatus(input) {
   return has(canon) ? asEnum(canon) : null;
 }
 
-// Serializa Prisma.Decimal a entero COP para JSON
-const toIntCOP = (v) => (v == null ? null : Math.round(Number(v)));
-// Serializa Prisma.Decimal a number (por si necesitas %)
-const toNum = (v) => (v == null ? null : Number(v));
+const toIntCOP = v => (v == null ? null : Math.round(Number(v)));
+const toNum    = v => (v == null ? null : Number(v));
 
 // Sanitiza número en request
 function asNumberOrNull(v) {

@@ -1,199 +1,213 @@
-// app/orders/page.tsx
 "use client";
+export const dynamic = 'force-dynamic';
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { apiGet, apiPatch } from "@/lib/api";
+import { apiGet, apiPatch } from '@/lib/api';
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
-
-const apiUrl = (p: string) =>
-  `${API_BASE}${p.startsWith("/") ? p : "/" + p}`;
-
-async function getJSON<T>(path: string): Promise<T> {
-  const r = await fetch(apiUrl(path), { cache: "no-store" });
-  if (!r.ok) throw new Error(`GET ${path} -> ${r.status}`);
-  return r.json();
-}
-
-async function patchJSON<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(apiUrl(path), {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`PATCH ${path} -> ${r.status}`);
-  return r.json();
-}
-
-type OrderItem = {
-  id: string;
-  qty_bags: number;
-  unit_price: number | string;
-  line_total: number | string;
-  product: { name: string; pelletized: boolean };
-};
-
-type Customer = {
-  id: string;
-  name: string;
-  whatsapp_phone: string;
-};
-
-type Order = {
-  id: string;
-  status:
-    | "pending_payment"
-    | "processing"
-    | "ready"
-    | "delivered"
-    | "canceled"
-    | string;
-  total_bags: number;
-  subtotal: number | string;
-  discount_total: number | string;
-  total: number | string;
-  created_at: string;
-  customer: Customer;
-  items: OrderItem[];
-};
-
+// Estados que verá el usuario en el <select>
 const STATUS_OPTIONS = [
-  { value: "pending_payment", label: "Pendiente pago" },
-  { value: "processing", label: "En producción" },
-  { value: "ready", label: "Programado/Listo" },
-  { value: "delivered", label: "Entregado" },
-  { value: "canceled", label: "Cancelado" },
+  { value: "pending_payment", label: "Pendiente de pago" },
+  { value: "processing",      label: "En proceso" },
+  { value: "ready",           label: "Listo / Programado" },
+  { value: "delivered",       label: "Entregado" },
+  { value: "canceled",        label: "Cancelado" },
 ];
+// ---- Componente cliente para editar el estado ----
+function StatusSelectClient({ id, value, onSaved }) {
+  'use client';
+  const [v, setV] = React.useState(value);
+  const [pending, startTransition] = React.useTransition();
 
-function fmtCOP(n: number | string) {
-  const val = Number(n || 0);
-  return new Intl.NumberFormat("es-CO", {
-    style: "currency",
-    currency: "COP",
-    maximumFractionDigits: 0,
-  }).format(val);
+// Mapa DB -> UI (la DB usa 'scheduled' y 'in_production')
+const DB_TO_UI = {
+  scheduled: "ready",
+  in_production: "processing",
+  // por si quedara algo viejo en DB:
+  paid: "processing",
+};
+  const OPTIONS = [
+    'pending_payment',
+    'processing',
+    'ready',
+    'delivered',
+    'canceled',
+  ];
+
+// Mapa UI -> etiqueta (para mostrar bonito si lo necesitas)
+const LABELS = Object.fromEntries(STATUS_OPTIONS.map(o => [o.value, o.label]));
+
+// Normaliza un estado cualquiera al canónico de UI
+function toUiStatus(s) {
+  if (!s) return "";
+  const k = String(s).toLowerCase();
+  return DB_TO_UI[k] || k;
 }
 
-export default function OrdersPage() {
-  const [rows, setRows] = useState<Order[]>([]);
+function fmtBogota(dt) {
+  if (!dt) return "";
+  try {
+    const d = typeof dt === "string" ? new Date(dt) : dt;
+    return d.toLocaleString("es-CO", { timeZone: "America/Bogota" });
+  } catch {
+    return "";
+  }
+}
+
+export default function Page() {
+  const [orders, setOrders]   = useState([]);
   const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<string>("");
+  const [err, setErr]         = useState(null);
+  const [savingId, setSaving] = useState(null); // para deshabilitar el select mientras guarda
 
   async function load() {
     setLoading(true);
-    setError(null);
-    try {
-      const qs = filter ? `?status=${encodeURIComponent(filter)}` : "";
-      const data = await getJSON<Order[]>(`/api/orders${qs}`);
-      setRows(data);
-    } catch (e: any) {
-      setError(e?.message || "Error cargando pedidos");
+  async function save(next) {
+    setV(next); // optimista
+try {
+      // Importante: el helper ya antepone /api y usa NEXT_PUBLIC_API_BASE
+      const data = await apiGet("/orders");
+      setOrders(Array.isArray(data) ? data : []);
+      setErr(null);
+      const updated = await apiPatch(`/orders/${id}`, { status: next });
+      onSaved?.(updated);
+} catch (e) {
+      setErr(e?.message || "Error cargando pedidos");
     } finally {
       setLoading(false);
-    }
-  }
+      console.error('PATCH /orders/:id failed', e);
+      alert('No se pudo actualizar el estado');
+      setV(value); // rollback
+}
+}
 
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter]);
+  }, []);
 
-  async function updateStatus(id: string, status: string) {
-    setSavingId(id);
-    setError(null);
+  async function onChangeStatus(id, nextUiStatus) {
+    // Optimistic UI
+    const prev = orders;
+    setSaving(id);
+    setOrders(curr =>
+      curr.map(o => (o.id === id ? { ...o, status: nextUiStatus } : o))
+    );
     try {
-      const updated = await patchJSON<Order>(`/api/orders/${id}`, { status });
-      setRows((prev) => prev.map((o) => (o.id === id ? { ...o, ...updated } : o)));
-    } catch (e: any) {
-      setError(e?.message || "No se pudo actualizar el estado");
+      // Enviamos el valor canónico de UI; el backend lo mapea a la enum real
+      await apiPatch(`/orders/${id}`, { status: nextUiStatus });
+    } catch (e) {
+      alert(`Error actualizando estado: ${e?.message || e}`);
+      setOrders(prev); // rollback
     } finally {
-      setSavingId(null);
+      setSaving(null);
     }
   }
-
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-semibold">Pedidos</h1>
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-600">Filtrar estado:</label>
-          <select
-            className="border rounded px-2 py-1"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          >
-            <option value="">Todos</option>
-            {STATUS_OPTIONS.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-          <button
-            className="border px-3 py-1 rounded"
-            onClick={load}
-            title="Refrescar"
-          >
-            Refrescar
+    <select
+      value={v}
+      onChange={(e) => startTransition(() => save(e.target.value))}
+      disabled={pending}
+      style={{ padding: 4 }}
+    >
+      {OPTIONS.map((s) => (
+        <option key={s} value={s}>{s}</option>
+      ))}
+    </select>
+  );
+}
+
+  const totalPedidos = useMemo(() => orders.length, [orders]);
+// ---- Página (server component) ----
+export default async function Page() {
+  const orders = await apiGet('/orders'); // trae todo
+
+return (
+<div>
+<h1>Pedidos</h1>
+
+      {loading && <p>Cargando…</p>}
+      {err && (
+        <p style={{ color: "crimson" }}>
+          {String(err)}{" "}
+          <button onClick={load} style={{ marginLeft: 8 }}>
+            Reintentar
           </button>
-        </div>
-      </div>
+        </p>
+      )}
 
-      {error && <div className="mb-3 bg-red-100 p-3 rounded text-sm">{error}</div>}
+      <p style={{ opacity: 0.8 }}>Total: {totalPedidos}</p>
 
-      {loading ? (
-        <div>Cargando…</div>
-      ) : (
-        <table className="w-full border rounded overflow-hidden text-sm">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="p-3 text-left">Pedido</th>
-              <th className="p-3 text-left">Cliente</th>
-              <th className="p-3 text-left">Creado</th>
-              <th className="p-3 text-right">Bultos</th>
-              <th className="p-3 text-right">Subtotal</th>
-              <th className="p-3 text-right">Desc</th>
-              <th className="p-3 text-right">Total</th>
-              <th className="p-3 text-left">Estado</th>
-              <th className="p-3 text-center">Acción</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((o) => (
-              <tr key={o.id} className="border-t">
-                <td className="p-3">{o.id.slice(0, 8)}…</td>
-                <td className="p-3">
-                  <div className="font-medium">{o.customer?.name}</div>
-                  <div className="text-xs text-gray-500">{o.customer?.whatsapp_phone}</div>
-                </td>
-                <td className="p-3">{new Date(o.created_at).toLocaleString("es-CO")}</td>
-                <td className="p-3 text-right">{o.total_bags}</td>
-                <td className="p-3 text-right">{fmtCOP(o.subtotal)}</td>
-                <td className="p-3 text-right text-amber-700">{fmtCOP(o.discount_total)}</td>
-                <td className="p-3 text-right font-semibold">{fmtCOP(o.total)}</td>
-                <td className="p-3">
+<table
+        cellPadding={8}
+        style={{ borderCollapse: 'collapse', width: '100%', background: '#fff' }}
+border="1"
+        cellPadding="8"
+        style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}
+>
+<thead>
+<tr>
+<th>ID</th>
+<th>Cliente</th>
+<th>Estado</th>
+<th>Bultos</th>
+<th>Total</th>
+<th>Programado</th>
+<th>Listo</th>
+</tr>
+</thead>
+<tbody>
+          {orders.map(o => {
+            const uiStatus = toUiStatus(o.status);
+          {orders.map((o) => {
+            const shortId = o.id?.slice(0, 8) ?? '';
+            const eta = o.scheduled_at
+              ? new Date(o.scheduled_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
+              : '';
+            const ready = o.ready_at
+              ? new Date(o.ready_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' })
+              : '';
+            const total = Number(o.total || 0).toLocaleString('es-CO', {
+              style: 'currency',
+              currency: 'COP',
+              maximumFractionDigits: 0
+            });
+
+return (
+<tr key={o.id}>
+                <td style={{ fontFamily: "monospace" }}>{o.id.slice(0, 8)}</td>
+                <td>{o.customer?.name ?? ""}</td>
+                <td>{shortId}</td>
+                <td>{o.customer?.name ?? ''}</td>
+<td>
                   <select
-                    className="border rounded px-2 py-1"
-                    value={STATUS_OPTIONS.find(s => s.value === o.status)?.value || o.status}
-                    onChange={(e) => updateStatus(o.id, e.target.value)}
+                    value={uiStatus}
+                    disabled={savingId === o.id}
+                    onChange={e => onChangeStatus(o.id, e.target.value)}
                   >
-                    {STATUS_OPTIONS.map((s) => (
-                      <option key={s.value} value={s.value}>
-                        {s.label}
+                    {STATUS_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
                       </option>
                     ))}
                   </select>
-                </td>
-                <td className="p-3 text-center">
-                  {savingId === o.id ? "Guardando…" : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
+                  <StatusSelectClient
+                    id={o.id}
+                    value={o.status}
+                    onSaved={() => {/* opcional: revalidar o nada */}}
+                  />
+</td>
+<td>{o.total_bags}</td>
+                <td>{Number(o.total || 0).toLocaleString("es-CO")}</td>
+                <td>{fmtBogota(o.scheduled_at)}</td>
+                <td>{fmtBogota(o.ready_at)}</td>
+                <td>{total}</td>
+                <td>{eta}</td>
+                <td>{ready}</td>
+</tr>
+);
+})}
+</tbody>
+</table>
+</div>
+);
 }

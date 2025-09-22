@@ -4,6 +4,9 @@ import { prisma } from "./db.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
+const toIntCOP = v => (v == null ? null : Math.round(Number(v)));
+const toNum    = v => (v == null ? null : Number(v));ø
+
 const upload = multer({ dest: "uploads/" });
 export const router = express.Router();
 

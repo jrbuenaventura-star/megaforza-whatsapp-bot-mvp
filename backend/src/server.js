@@ -1,531 +1,377 @@
 // backend/src/server.js
-import { sendChoicesMenu } from "./wa.js";
 import express from "express";
-import bodyParser from "body-parser";
 import cors from "cors";
-import dotenv from "dotenv";
+import morgan from "morgan";
+
 import { prisma } from "./db.js";
 import { router as api } from "./routes.js";
-import { sendText, sendMenu, sendProductList } from "./wa.js";
 import { scheduleOrderForItems } from "./scheduler.js";
-import { Prisma, OrderStatus } from "@prisma/client";
 
-const AGENTS = (process.env.AGENT_WHATSAPP_NUMBERS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+// ====== ENV ======
+const {
+  PORT = 3000,
 
-// Estado temporal de la conversación (por número de WhatsApp)
-const sessions = new Map(); // ej: sessions.set('573001234567', { state: 'REG_NAME', draft: {} })
+  // WhatsApp Cloud API
+  WHATSAPP_ACCESS_TOKEN,         // Bearer
+  WHATSAPP_BUSINESS_NUMBER,      // phone_number_id (ej: 123456789012345)
+  WHATSAPP_VERIFY_TOKEN,         // para GET /webhook verificación
+  WHATSAPP_CATALOG_ID,           // catalog_id (para product_list)
 
-dotenv.config();
+  // Opcional: webhook propio para sync de catálogo
+  WA_CATALOG_SYNC_URL,
+} = process.env;
 
+// ====== APP ======
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(morgan("tiny"));
 
-// ───────────────────── Utilidades ─────────────────────
-const fmtCOP = (n) =>
-  Number(n).toLocaleString("es-CO", {
-    style: "currency",
-    currency: "COP",
-    maximumFractionDigits: 0,
-  });
+// Monta API REST
+app.use("/api", api);
 
-/**
-/**
- * Regla de negocio:
- * - Si la hora en Bogotá es > 16:30, mover la entrega al día siguiente a las 08:00 (Bogotá).
- * - Si no, dejar la hora tal cual.
- * Nota: Bogotá está en UTC-5 (sin DST). 08:00 BOG = 13:00 UTC.
- */
-function etaTextBogotaNextDayIfAfter1630(dateLike) {
-  const fmtParts = new Intl.DateTimeFormat("es-CO", {
-    timeZone: "America/Bogota",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(dateLike);
+// ====== Sesiones simples en memoria (onboarding) ======
+const sessions = new Map();
+// session = {
+//   state: "REG_NAME" | "REG_TAX" | "REG_EMAIL" | null,
+//   draft: { name, tax_id, billing_email, doc_type? },
+// }
 
-  const get = (t) => fmtParts.find((p) => p.type === t)?.value;
-
-  const year = parseInt(get("year"), 10);
-  const month = parseInt(get("month"), 10);
-  const day = parseInt(get("day"), 10);
-  const hour = parseInt(get("hour") || "0", 10);
-  const minute = parseInt(get("minute") || "0", 10);
-
-  const after1630 = hour > 16 || (hour === 16 && minute > 30);
-
-  const outDate = after1630
-    // Siguiente día a las 08:00 Bogotá → 13:00 UTC
-    ? new Date(Date.UTC(year, month - 1, day + 1, 13, 0, 0))
-    // Dejar igual
-    : new Date(dateLike);
-
-  return new Intl.DateTimeFormat("es-CO", {
-    timeZone: "America/Bogota",
-    dateStyle: "short",
-    timeStyle: "short",
-    hour12: false,
-  }).format(outDate);
-}
-function getSkuList(envKey) {
-  return (process.env[envKey] || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-/** Resuelve el enum de estado “pendiente de pago” de forma segura */
-function getSafePendingStatus() {
-  const S = Prisma?.OrderStatus ?? OrderStatus ?? {};
-  return S.PENDING_PAYMENT ?? S.pending_payment ?? "pending_payment";
+// ====== Helpers de WhatsApp ======
+async function sendText(to, text) {
+  if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_BUSINESS_NUMBER) return;
+  try {
+    await fetch(`https://graph.facebook.com/v19.0/${WHATSAPP_BUSINESS_NUMBER}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        text: { body: text },
+      }),
+    });
+  } catch (e) {
+    console.error("sendText error:", e?.message || e);
+  }
 }
 
-// ───────────────────── Webhook VERIFY ─────────────────────
+async function sendInteractiveButtons(to, bodyText, buttons) {
+  if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_BUSINESS_NUMBER) return;
+  try {
+    await fetch(`https://graph.facebook.com/v19.0/${WHATSAPP_BUSINESS_NUMBER}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: { text: bodyText },
+          action: {
+            buttons: buttons.map((b) => ({
+              type: "reply",
+              reply: { id: b.id, title: b.title },
+            })),
+          },
+        },
+      }),
+    });
+  } catch (e) {
+    console.error("sendInteractiveButtons error:", e?.message || e);
+  }
+}
+
+async function sendInteractiveProductList(to, catalog_id, product_items) {
+  if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_BUSINESS_NUMBER || !catalog_id) return;
+  try {
+    await fetch(`https://graph.facebook.com/v19.0/${WHATSAPP_BUSINESS_NUMBER}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "product_list",
+          header: { type: "text", text: "Catálogo Megaforza" },
+          body: { text: "Selecciona tus productos y cantidades." },
+          action: { catalog_id, product_items },
+        },
+      }),
+    });
+  } catch (e) {
+    console.error("sendInteractiveProductList error:", e?.message || e);
+  }
+}
+
+// ====== GET /webhook (verificación) ======
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+
+  if (mode === "subscribe" && token === WHATSAPP_VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-// ───────────────────── Webhook RECEIVE ─────────────────────
+// ====== POST /webhook (mensajes entrantes) ======
 app.post("/webhook", async (req, res) => {
-  console.log('[WEBHOOK IN]', JSON.stringify(req.body));
   try {
-    const change = req.body.entry?.[0]?.changes?.[0];
-    const entry = change?.value;
-    const msg = entry?.messages?.[0];
-
-    // No hay mensaje (solo statuses)
-    if (!msg) return res.sendStatus(200);
-
-    const from = msg.from;
-
-    // ───────────── Respuestas INTERACTIVAS (botones/listas) ─────────────
-    if (msg.type === "interactive") {
-      const choiceId =
-        msg?.interactive?.button_reply?.id ||
-        msg?.interactive?.list_reply?.id ||
-        "";
-
-      const contactName = entry?.contacts?.[0]?.profile?.name || "Cliente";
-      const customer = await prisma.customer.findUnique({
-        where: { whatsapp_phone: from },
-      });
-
-      if (choiceId === "PEDIR") {
-        // Si NO es cliente → iniciar registro guiado
-        if (!customer) {
-          sessions.set(from, { state: "REG_NAME", draft: {} });
-          await sendText(
-            from,
-            "Perfecto. Para empezar, ¿cuál es tu *nombre o razón social*?"
-          );
-          return res.sendStatus(200);
-        }
-
-        // Es cliente → enviar listas por presentación
-        const skus25 = getSkuList("WHATSAPP_SKUS_25KG");
-        const skus1t = getSkuList("WHATSAPP_SKUS_1T");
-
-        await sendText(
-          from,
-          "Elige tus productos por presentación. Abre la lista y usa ➕ para agregar al carrito."
-        );
-
-        if (skus25.length) {
-          await sendProductList(from, {
-            title: "Presentación: 25 kg",
-            body: "Toca para ver opciones de 25 kg",
-            sectionTitle: "Bultos de 25 kg",
-            skus: skus25,
-          });
-        }
-        if (skus1t.length) {
-          await sendProductList(from, {
-            title: "Presentación: 1 tonelada",
-            body: "Toca para ver opciones de 1 tonelada",
-            sectionTitle: "A granel (1T)",
-            skus: skus1t,
-          });
-        }
-        return res.sendStatus(200);
-      }
-
-      if (choiceId === "AGENTE") {
-        // Confirma al cliente
-        await sendText(
-          from,
-          "Te conecto con un representante ahora mismo. Te escribirán en breve."
-        );
-
-        // Notifica a tus agentes con link para escribirle desde su propio número
-        const link = `https://wa.me/${from}?text=${encodeURIComponent(
-          `Hola ${contactName}, soy del equipo de Megaforza. Vimos tu mensaje en WhatsApp.`
-        )}`;
-
-        for (const agent of AGENTS) {
-          await sendText(
-            agent,
-            `📞 *Nuevo chat*\nDe: ${contactName}\nNúmero: ${from}\nAbrir chat: ${link}`
-          );
-        }
-
-        return res.sendStatus(200);
-      }
-
-      await sendText(from, 'No entendí tu selección. Escribe "menu" para ver opciones.');
+    const body = req.body;
+    if (body?.object !== "whatsapp_business_account") {
       return res.sendStatus(200);
     }
 
-    // ───────────── Saludo → mostrar menú ─────────────
-    const bodyText = msg.text?.body?.trim().toLowerCase() || "";
-    if (
-      msg.type === "text" &&
-      ["hola", "menu", "hi", "help", "ayuda", "inicio"].includes(bodyText)
-    ) {
-      await sendChoicesMenu(from);
-      return res.sendStatus(200);
-    }
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        const value = change.value;
+        const messages = value?.messages || [];
+        const contacts = value?.contacts || [];
 
-    // ───────────── Registro guiado (paso a paso) ─────────────
-    const session = sessions.get(from);
-    const text = msg.text?.body?.trim() || "";
-    if (msg.type === "text" && session) {
-      const t = text;
+        const waId = contacts?.[0]?.wa_id || messages?.[0]?.from;
+        if (!waId) continue;
 
-      if (session.state === "REG_NAME") {
-        session.draft.name = t;
-        session.state = "REG_TAX";
-        await sendText(from, "Gracias. ¿Cuál es tu *NIT o cédula*?");
-        return res.sendStatus(200);
-      }
+        for (const msg of messages) {
+          // 1) Order desde catálogo
+          if (msg.type === "order" && msg.order?.product_items?.length) {
+            await handleCatalogOrder(waId, msg);
+            continue;
+          }
 
-      if (session.state === "REG_TAX") {
-        session.draft.tax_id = t;
-        session.state = "REG_EMAIL";
-        await sendText(from, "Perfecto. ¿Cuál es tu *correo de facturación*?");
-        return res.sendStatus(200);
-      }
+          // 2) Onboarding con botones
+          if (msg.type === "interactive" && msg.interactive?.type === "button_reply") {
+            const id = msg.interactive?.button_reply?.id;
+            if (id === "PEDIR") {
+              // Inicia registro si no existe cliente
+              const existing = await prisma.customer.findUnique({
+                where: { whatsapp_phone: waId },
+              });
+              if (existing) {
+                // Ya está registrado ⇒ envía catálogo
+                await pushCatalog(waId);
+              } else {
+                // Arrancar flujo de registro sin saludo genérico
+                sessions.set(waId, { state: "REG_NAME", draft: {} });
+                await sendText(
+                  waId,
+                  "Para registrarte, por favor dime tu nombre o el de tu empresa."
+                );
+              }
+            }
+            continue;
+          }
 
-      if (session.state === "REG_EMAIL") {
-  session.draft.billing_email = t;
+          // 3) Onboarding por texto clásico
+          if (msg.type === "text") {
+            const t = (msg.text?.body || "").trim();
 
-  const waId = from;                                  // "5730..."
-  const name = (session.draft.name || "").trim();
-  const billing_email = (session.draft.billing_email || "").trim();
+            const session = sessions.get(waId) || { state: null, draft: {} };
 
-  // Lo que venías guardando como tax_id lo usamos como doc_number
-  const doc_number_raw = (session.draft.tax_id || "").trim();
+            if (session.state === "REG_NAME") {
+              session.draft.name = t;
+              session.state = "REG_TAX";
+              sessions.set(waId, session);
+              await sendText(waId, "Perfecto. Ahora, ¿tu NIT o cédula?");
+              continue;
+            }
 
-  // Usa el doc_type capturado; si no, infiere: NIT si es largo numérico, si no CEDULA
-  const allowed = ["CEDULA", "NIT", "PASAPORTE", "CE"];
-  const doc_type = allowed.includes(session.draft.doc_type)
-    ? session.draft.doc_type
-    : (/^\d{9,}$/.test(doc_number_raw) ? "NIT" : "CEDULA");
+            if (session.state === "REG_TAX") {
+              session.draft.tax_id = t;
+              session.state = "REG_EMAIL";
+              sessions.set(waId, session);
+              await sendText(waId, "Gracias. Por último, ¿tu correo de facturación?");
+              continue;
+            }
 
-  const doc_number = doc_number_raw;
+            if (session.state === "REG_EMAIL") {
+              // Guardar registro y enviar catálogo
+              session.draft.billing_email = t;
+              const name = (session.draft.name || "").trim();
+              const billing_email = (session.draft.billing_email || "").trim();
+              const doc_number = (session.draft.tax_id || "").trim();
+              const doc_type = session.draft.doc_type || "CEDULA";
 
-  // Crear/actualizar por whatsapp_phone (único)
-  await prisma.customer.upsert({
-    where:  { whatsapp_phone: waId },
-    update: { name, billing_email, doc_number, doc_type },
-    create: { name, whatsapp_phone: waId, billing_email, doc_number, doc_type },
-  });
+              await prisma.customer.upsert({
+                where: { whatsapp_phone: waId },
+                update: { name, billing_email, doc_number, doc_type },
+                create: { name, whatsapp_phone: waId, billing_email, doc_number, doc_type },
+              });
 
-  // Confirmación + catálogo
-  await sendText(waId,
-    `¡Listo, ${name}! Ya quedaste registrad@ ✅\n` +
-    `Ahora puedes hacer tu pedido desde nuestro catálogo.`
-  );
+              await sendText(
+                waId,
+                `¡Listo, ${name}! Ya quedaste registrado ✅\nAhora puedes hacer tu pedido desde nuestro catálogo.`
+              );
+              await pushCatalog(waId);
 
-        
-  const products = await prisma.product.findMany({
-    where: { active: true },
-    orderBy: { name: "asc" },
-    take: 30, // máximo permitido por WA para product_list
-  });
-  const items = products.map(p => ({ product_retailer_id: p.sku }));
-  await sendInteractiveProductList(waId, process.env.WHATSAPP_CATALOG_ID, items);
+              sessions.delete(waId);
+              // Evita que caiga en otro saludo
+              continue;
+            }
 
-  // Limpia estado y CORTA aquí para NO caer al saludo genérico
-  session.state = null;
-  session.draft = {};
-  return res.sendStatus(200);
-}
-
-async function sendText(to, text) {
-  await fetch(`https://graph.facebook.com/v19.0/${process.env.WHATSAPP_BUSINESS_NUMBER}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      text: { body: text },
-    }),
-  });
-}
-
-async function sendInteractiveProductList(to, catalog_id, product_items) {
-  await fetch(`https://graph.facebook.com/v19.0/${process.env.WHATSAPP_BUSINESS_NUMBER}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "product_list",
-        header: { type: "text", text: "Catálogo Megaforza" },
-        body:   { text: "Selecciona tus productos y cantidades." },
-        action: { catalog_id, product_items },
-      },
-    }),
-  });
-}
-
-
-      
-
-        sessions.delete(from);
-        await sendText(
-          from,
-          "¡Listo! Te registré ✅. Abre el 🛍️ *catálogo* y envía tu pedido cuando quieras."
-        );
-        return res.sendStatus(200);
-      }
-    }
-
-    // ───────────── Buscar cliente ─────────────
-    let customer = await prisma.customer.findUnique({
-      where: { whatsapp_phone: from },
-    });
-
-    if (!customer) {
-      await sendText(
-        from,
-        '¡Hola! Soy el asistente de Megaforza. Escribe *menu* para registrarte o ver opciones.'
-      );
-      return res.sendStatus(200);
-    }
-
-    // ───────────── Pedidos desde CATÁLOGO ─────────────
-    if (msg?.type === "order") {
-      const productItems = msg.order?.product_items || [];
-      if (productItems.length === 0) {
-        await sendText(
-          from,
-          "No recibí productos en el pedido. Abre el 🛍️ catálogo y vuelve a enviarlo."
-        );
-        return res.sendStatus(200);
-      }
-
-      const skus = productItems.map((i) => i.product_retailer_id);
-      const products = await prisma.product.findMany({
-        where: { sku: { in: skus } },
-      });
-      const pMap = new Map(products.map((p) => [p.sku, p]));
-
-      const disc = Number(customer.discount_pct || 0);
-      let total_bags = 0;
-      const enrichedForSchedule = [];
-      const orderItemsData = [];
-
-      for (const it of productItems) {
-        const p = pMap.get(it.product_retailer_id);
-        const qty = Number(it.quantity || 0);
-        if (!p || !qty) continue;
-
-        // 1 tonelada = 40 bultos de 25 kg (detectado por sufijo -1T en el SKU)
-        const bagsPerUnit = String(p.sku || "").endsWith("-1T") ? 40 : 1;
-
-        // Capacidad total en "bultos equivalentes"
-        total_bags += qty * bagsPerUnit;
-
-        // Precio por unidad (bulto o tonelada según el producto)
-        const unit = Number(p.price_per_bag || 0);
-        const line_total = qty * unit * (1 - disc / 100);
-
-        // Para el scheduler, siempre enviar bultos equivalentes
-        enrichedForSchedule.push({
-          qty_bags: qty * bagsPerUnit,
-          pelletized: !!p.pelletized,
-        });
-
-        // Guardamos la línea con qty en bultos equivalentes para consistencia
-        orderItemsData.push({
-          product_id: p.id,
-          qty_bags: qty * bagsPerUnit,
-          unit_price: unit,
-          discount_pct_applied: disc,
-          line_total,
-        });
-      }
-
-      if (!orderItemsData.length) {
-        await sendText(
-          from,
-          "No pude reconocer los productos del catálogo. Verifica los SKUs y vuelve a intentar."
-        );
-        return res.sendStatus(200);
-      }
-
-      const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
-      const sch = await scheduleOrderForItems(
-        enrichedForSchedule,
-        new Date(),
-        cfg
-      );
-
-      const total = orderItemsData.reduce((s, i) => s + Number(i.line_total), 0);
-      const SAFE_STATUS = getSafePendingStatus();
-
-      const order = await prisma.order.create({
-        data: {
-          customer_id: customer.id,
-          status: SAFE_STATUS,
-          total_bags,
-          total,
-          items: { create: orderItemsData },
-          scheduled_at: sch.scheduled_at,
-          ready_at: sch.ready_at,
-        },
-      });
-
-      const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
-      const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
-
-      await sendText(
-        from,
-        `Pedido #${order.id.slice(0, 8)} recibido desde catálogo.\n` +
-          `Total: ${fmtCOP(total)}\n` +
-          `Entrega estimada: ${etaTxt}\n` +
-          `Por favor realiza el pago y envía el comprobante para confirmar.`
-      );
-
-      return res.sendStatus(200);
-    }
-
-    // ───────────── Pedidos por TEXTO (SKU x Cantidad) ─────────────
-    if (msg?.type === "text" && /[xX]\s*\d+/.test(text)) {
-      const pairs = text.split(/[;\n]+/);
-      const items = [];
-      for (const p of pairs) {
-        const m = p.match(/([A-Za-z0-9\-]+)\s*[xX]\s*(\d+)/);
-        if (m) {
-          const sku = m[1].trim();
-          const qty = parseInt(m[2], 10);
-          const prod = await prisma.product.findUnique({ where: { sku } });
-          if (prod) {
-            items.push({
-              product_id: prod.id,
-              qty_bags: qty,
-              pelletized: prod.pelletized,
-            });
+            // Si no hay sesión y escribe algo, ofrece botón “Hacer pedido”
+            // (sin el saludo largo que pediste remover)
+            if (!session.state) {
+              await sendInteractiveButtons(waId, "¿Qué deseas hacer?", [
+                { id: "PEDIR", title: "Hacer pedido" },
+              ]);
+            }
           }
         }
       }
-
-      if (items.length) {
-        const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
-        const sch = await scheduleOrderForItems(items, new Date(), cfg);
-
-        const prods = await prisma.product.findMany({
-          where: { id: { in: items.map((i) => i.product_id) } },
-        });
-        const map = new Map(prods.map((p) => [p.id, p]));
-        const disc = Number(customer.discount_pct || 0);
-
-        let total_bags = 0;
-        const orderItemsData = [];
-        for (const it of items) {
-          const p = map.get(it.product_id);
-          const unit = Number(p.price_per_bag || 0);
-          const qty = it.qty_bags;
-          total_bags += qty;
-          const line_total = qty * unit * (1 - disc / 100);
-          orderItemsData.push({
-            product_id: p.id,
-            qty_bags: qty,
-            unit_price: unit,
-            discount_pct_applied: disc,
-            line_total,
-          });
-        }
-
-        const total = orderItemsData.reduce((s, i) => s + Number(i.line_total), 0);
-        const SAFE_STATUS = getSafePendingStatus();
-
-        const order = await prisma.order.create({
-          data: {
-            customer_id: customer.id,
-            status: SAFE_STATUS,
-            total_bags,
-            total,
-            items: { create: orderItemsData },
-            scheduled_at: sch.scheduled_at,
-            ready_at: sch.ready_at,
-          },
-        });
-
-        const etaSource = sch.delivery_at ?? sch.ready_at ?? new Date();
-        const etaTxt = etaTextBogotaNextDayIfAfter1630(etaSource);
-
-        await sendText(
-          from,
-          `Tu pedido #${order.id.slice(0, 8)} está pre-agendado.\n` +
-            `Total: ${fmtCOP(total)}.\n` +
-            `Entrega estimada: ${etaTxt}.\n` +
-            `Envía el soporte de pago para confirmar.`
-        );
-        return res.sendStatus(200);
-      }
     }
 
-    // ───────────── Fallback SOLO texto ─────────────
-    if (msg?.type === "text") {
-      const low = text.toLowerCase();
-      if (["catalogo", "catálogo", "menu", "menú"].includes(low)) {
-        await sendText(
-          from,
-          "Toca el ícono de tienda 🛍️ y envía el pedido desde el catálogo."
-        );
-      } else {
-        await sendText(
-          from,
-          "Escribe tu pedido como: SKU x cantidad (ej: LEC-18P x 1200). También puedes pedir el *catálogo* o *estado de pedidos*."
-        );
-      }
-      return res.sendStatus(200);
-    }
-
-    // Otros tipos: ignorar
-    return res.sendStatus(200);
-  } catch (e) {
-    console.error(e);
-    return res.sendStatus(200);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Webhook error:", err?.message || err);
+    res.sendStatus(200);
   }
 });
 
-// ───────────────────── API ─────────────────────
-app.use("/api", api);
+// ====== helpers específicos ======
+async function pushCatalog(waId) {
+  // Intenta construir hasta 30 items activos por SKU
+  try {
+    const prods = await prisma.product.findMany({
+      where: { active: true },
+      orderBy: { name: "asc" },
+      take: 30,
+    });
+    const items = prods.map((p) => ({ product_retailer_id: p.sku }));
+    await sendInteractiveProductList(waId, WHATSAPP_CATALOG_ID, items);
+  } catch (e) {
+    console.error("pushCatalog error:", e?.message || e);
+  }
+}
 
-// ───────────────────── Boot ─────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
+// Crea un pedido a partir de un mensaje de tipo order del Catálogo de WhatsApp
+async function handleCatalogOrder(waId, msg) {
+  // Estructura: msg.order.product_items: [{ product_retailer_id, quantity, item_price, currency }]
+  const orderItems = msg.order.product_items || [];
+
+  // Cliente (si no existe, crea mínimo con phone)
+  let customer = await prisma.customer.findUnique({ where: { whatsapp_phone: waId } });
+  if (!customer) {
+    customer = await prisma.customer.create({
+      data: {
+        name: waId, // provisional
+        whatsapp_phone: waId,
+        doc_type: "CEDULA",
+        doc_number: "",
+      },
+    });
+  }
+
+  // Cargar productos por SKU
+  const skuList = orderItems.map((i) => i.product_retailer_id).filter(Boolean);
+  const dbProducts = await prisma.product.findMany({ where: { sku: { in: skuList } } });
+
+  // Map SKU → producto
+  const bySKU = new Map(dbProducts.map((p) => [p.sku, p]));
+
+  // Construir items de DB
+  const itemsForDb = [];
+  for (const it of orderItems) {
+    const p = bySKU.get(it.product_retailer_id);
+    if (!p) continue;
+    const qtyWhatsApp = Number(it.quantity || 0);
+
+    // Para almacenamiento: qty_bags = bultos. 1T ⇒ 25 bultos * cantidad
+    const bags = p.sku?.endsWith("1T") ? qtyWhatsApp * 25 : qtyWhatsApp;
+
+    itemsForDb.push({
+      product_id: p.id,
+      qty_bags: bags,
+      unit_price_cop: Number(p.price_per_bag), // guardar entero COP
+    });
+  }
+
+  if (itemsForDb.length === 0) {
+    await sendText(waId, "No pudimos reconocer productos del catálogo. ¿Puedes intentar nuevamente?");
+    return;
+  }
+
+  // Totales
+  const subtotal = itemsForDb.reduce(
+    (s, it) => s + Number(it.qty_bags) * Number(it.unit_price_cop),
+    0
+  );
+  const discountPct = Number(customer.discount_pct || 0);
+  const discountTotal = Math.round((subtotal * discountPct) / 100);
+  const total = subtotal - discountTotal;
+
+  // Scheduling (usa productos y si son pelletizados)
+  const richItems = [];
+  for (const it of itemsForDb) {
+    const prod = dbProducts.find((p) => p.id === it.product_id);
+    if (!prod) continue;
+    richItems.push({
+      product_id: prod.id,
+      pelletized: !!prod.pelletized,
+      qty_bags: it.qty_bags,
+    });
+  }
+
+  // Configuración por defecto (ajústala si tienes tabla/config en BD)
+  const schedCfg = {
+    timezone: "America/Bogota",
+    workdays: "Mon,Tue,Wed,Thu,Fri,Sat",
+    workday_start: "08:00",
+    workday_end: "17:00",
+    dispatch_buffer_min: 60,
+    pellet_bph: 80,
+    non_pellet_bph: 80,
+    // variantes sábado (opcional):
+    sat_workday_start: "08:00",
+    sat_workday_end: "11:00",
+    sat_pellet_bph: 60,
+    sat_non_pellet_bph: 60,
+  };
+
+  const sch = await scheduleOrderForItems(richItems, new Date(), schedCfg);
+
+  // Crear pedido en estado inicial = pending_payment
+  const created = await prisma.order.create({
+    data: {
+      customer_id: customer.id,
+      status: "pending_payment",
+      scheduled_at: sch.scheduled_at,
+      ready_at: sch.ready_at,
+      delivery_at: sch.delivery_at,
+      subtotal_cop: subtotal,
+      discount_total_cop: discountTotal,
+      total_cop: total,
+      items: {
+        createMany: {
+          data: itemsForDb,
+        },
+      },
+    },
+    include: { items: true, customer: true },
+  });
+
+  await sendText(
+    waId,
+    `Pedido recibido ✅\n` +
+      `Subtotal: $${subtotal.toLocaleString("es-CO")}\n` +
+      (discountTotal > 0 ? `Descuento: $${discountTotal.toLocaleString("es-CO")}\n` : "") +
+      `Total: $${total.toLocaleString("es-CO")}\n` +
+      `Entrega estimada: ${new Date(created.delivery_at).toLocaleString("es-CO")}`
+  );
+}
+
+// ====== Arrancar ======
+app.listen(PORT, () => {
   console.log(`Backend running on http://0.0.0.0:${PORT}`);
 });

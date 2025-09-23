@@ -384,9 +384,11 @@ router.post("/orders", async (req, res) => {
     });
 
     const enriched = order.items.map((i) => ({
-      qty_bags: i.qty_bags,
-      pelletized: i.product.pelletized,
-    }));
+  qty_bags: i.qty_bags,
+  pelletized: i.product.pelletized,
+  sku: i.product.sku,
+}));
+
     const sch = await scheduleOrderForItems(enriched, new Date(), cfg);
     await prisma.order.update({
       where: { id: order.id },

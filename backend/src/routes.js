@@ -1,165 +1,212 @@
 // backend/src/routes.js
 import express from "express";
 import { prisma } from "./db.js";
-import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
+import { scheduleOrderForItems } from "./scheduler.js";
 
-export const router = express.Router();
-
-/* ─────────── Serializadores numéricos ─────────── */
+// ───────────────────────── helpers de serialización ─────────────────────────
 const toIntCOP = (v) => (v == null ? null : Math.round(Number(v)));
 const toNum    = (v) => (v == null ? null : Number(v));
 
-/* ─────────── Mapeo de estados canónicos ↔ enum BD ─────────── */
-const _statusEnum = (Prisma?.OrderStatus ?? OrderStatus ?? {});
-const _keys = Object.keys(_statusEnum);
-const _vals = Object.values(_statusEnum);
-const _has = (v) => _keys.includes(v) || _vals.includes(v);
-const _asEnum = (v) => _statusEnum[v] ?? v;
+function clamp(val, min, max) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
 
-/** Acepta: pending_payment|paid|processing|in_production|scheduled|ready|delivered|canceled */
-function toDbStatus(s) {
-  if (!s) return null;
-  const canon = String(s).trim().toLowerCase();
+// ───────────────────────── mapeo de estados ─────────────────────────
+const CANON_TO_DB = {
+  pending_payment: "pending_payment",
+  paid: "paid",
+  processing: "in_production",  // canónico → BD
+  in_production: "in_production",
+  ready: "scheduled",           // canónico → BD
+  scheduled: "scheduled",
+  delivered: "delivered",
+  canceled: "canceled",
+};
 
-  // Normalizaciones
-  const map = {
-    pending: "pending_payment",
-    pending_payment: "pending_payment",
-    paid: "paid",
-    processing: "in_production",      // canónico → enum
-    in_production: "in_production",
-    scheduled: "scheduled",
-    ready: "scheduled",                // canónico UI → enum
-    delivered: "delivered",
-    canceled: "canceled",
-    cancelled: "canceled",
-  };
+const DB_ENUM = Prisma?.OrderStatus ?? OrderStatus ?? {};
+const DB_VALUES = new Set(Object.values(DB_ENUM));
+const DB_KEYS   = new Set(Object.keys(DB_ENUM));
 
-  const picked = map[canon] || canon;
-  if (_has(picked)) return _asEnum(picked);
+function toDbStatus(maybe) {
+  if (!maybe) return null;
+  const s = String(maybe).trim().toLowerCase();
+  const mapped = CANON_TO_DB[s] || s;
+  if (DB_VALUES.has(mapped) || DB_KEYS.has(mapped)) {
+    // si pasa "IN_PRODUCTION" como key del enum, tradúcelo al valor
+    return DB_ENUM[mapped] ?? mapped;
+  }
   return null;
 }
 
-/* ─────────── Aux: bultos (SKU 1T ⇒ 25 bultos por unidad) ─────────── */
-function bagsForItem(it) {
-  const sku = it?.sku || it?.product?.sku || "";
-  const perUnit = typeof sku === "string" && sku.trim().endsWith("1T") ? 25 : 1;
-  return Number(it?.qty_bags || 0) * perUnit; // si ya viene en bultos, qty_bags; si se usa qty_unidades, adaptar aquí
+function toCanonStatus(dbValue) {
+  const v = String(dbValue || "").toLowerCase();
+  if (v === "in_production") return "processing";
+  if (v === "scheduled")     return "ready";
+  return v;
 }
 
-/* ─────────── HEALTH ─────────── */
-router.get("/health", (_req, res) => res.json({ ok: true }));
-
-/* ─────────── PRODUCTS ─────────── */
-
-// GET /products?all=1  (si no, solo activos)
-router.get("/products", async (req, res) => {
-  const all = req.query.all === "1" || req.query.all === "true";
-  const where = all ? {} : { active: true };
-  const prods = await prisma.product.findMany({
-    where,
-    orderBy: { name: "asc" },
-  });
-
-  const out = prods.map((p) => ({
+// ───────────────────────── mapeo de productos y clientes ─────────────────────────
+function productOut(p) {
+  return {
     id: p.id,
     sku: p.sku,
     name: p.name,
-    active: !!p.active,
-    pelletized: !!p.pelletized,
-    price_per_bag: toIntCOP(p.price_per_bag), // number entero COP
-  }));
+    active: Boolean(p.active),
+    pelletized: Boolean(p.pelletized),
+    price_per_bag: toIntCOP(p.price_per_bag),
+    created_at: p.created_at,
+    updated_at: p.updated_at,
+  };
+}
 
-  res.json(out);
+function customerOut(c) {
+  return {
+    id: c.id,
+    name: c.name,
+    whatsapp_phone: c.whatsapp_phone,
+    discount_pct: toNum(c.discount_pct),
+    billing_email: c.billing_email,
+    doc_type: c.doc_type,
+    doc_number: c.doc_number,
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+  };
+}
+
+// ───────────────────────── router ─────────────────────────
+export const router = express.Router();
+
+// Health
+router.get("/health", (_req, res) => {
+  res.json({ ok: true });
 });
 
-// PATCH /products/:id  { price_per_bag?, active? }
+// ───────────────────────── productos ─────────────────────────
+
+// GET /products?all=1
+router.get("/products", async (req, res) => {
+  try {
+    const all = req.query.all === "1" || req.query.all === "true";
+    const where = all ? {} : { active: true };
+    const prods = await prisma.product.findMany({
+      where,
+      orderBy: [{ active: "desc" }, { name: "asc" }],
+    });
+    res.json(prods.map(productOut));
+  } catch (e) {
+    console.error("GET /products error", e);
+    res.status(500).json({ error: "get_products_failed" });
+  }
+});
+
+// PATCH /products/:id  { price_per_bag?: number, active?: boolean, name?: string }
 router.patch("/products/:id", async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = String(req.params.id);
     const data = {};
 
+    if (req.body.name != null) data.name = String(req.body.name);
+    if (req.body.active != null) data.active = Boolean(req.body.active);
     if (req.body.price_per_bag != null) {
-      const v = Number(req.body.price_per_bag);
+      const v = Math.round(Number(req.body.price_per_bag));
       if (!Number.isFinite(v) || v < 0) {
-        return res.status(400).json({ error: "price_per_bag inválido" });
+        return res.status(400).json({ error: "invalid_price" });
       }
-      data.price_per_bag = Math.round(v);
+      // Prisma Decimal acepta number/string sin problema
+      data.price_per_bag = v;
     }
-    if (req.body.active != null) data.active = !!req.body.active;
 
     const updated = await prisma.product.update({
       where: { id },
       data,
     });
 
-    // Dispara sync de catálogo (opcional)
-    await fireCatalogSync(updated);
+    // Sync catálogo opcional
+    try {
+      const syncUrl = process.env.WA_CATALOG_SYNC_URL;
+      if (syncUrl) {
+        await fetch(syncUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sku: updated.sku,
+            price_cop: toIntCOP(updated.price_per_bag),
+            active: !!updated.active,
+          }),
+        }).catch(() => {});
+      }
+    } catch (_) { /* noop */ }
 
-    res.json({
-      id: updated.id,
-      sku: updated.sku,
-      name: updated.name,
-      active: !!updated.active,
-      price_per_bag: toIntCOP(updated.price_per_bag),
-    });
+    res.json(productOut(updated));
   } catch (e) {
-    console.error("PATCH /products error", e);
-    res.status(500).json({ error: "update_failed" });
+    console.error("PATCH /products/:id error", e);
+    res.status(500).json({ error: "patch_product_failed" });
   }
 });
 
-/* ─────────── CUSTOMERS ─────────── */
+// ───────────────────────── clientes ─────────────────────────
 
+// GET /customers
 router.get("/customers", async (_req, res) => {
-  const cs = await prisma.customer.findMany({
-    orderBy: { created_at: "desc" },
-  });
-  const out = cs.map((c) => ({
-    id: c.id,
-    name: c.name,
-    whatsapp_phone: c.whatsapp_phone,
-    doc_type: c.doc_type,
-    doc_number: c.doc_number,
-    billing_email: c.billing_email,
-    discount_pct: toNum(c.discount_pct) ?? 0,
-  }));
-  res.json(out);
+  try {
+    const customers = await prisma.customer.findMany({
+      orderBy: { created_at: "desc" },
+    });
+    res.json(customers.map(customerOut));
+  } catch (e) {
+    console.error("GET /customers error", e);
+    res.status(500).json({ error: "get_customers_failed" });
+  }
 });
 
-// PATCH /customers/:id  { discount_pct }
+// PATCH /customers/:id  { discount_pct?: number }
 router.patch("/customers/:id", async (req, res) => {
   try {
-    const id = req.params.id;
-    const dp = req.body.discount_pct;
+    const id = String(req.params.id);
+    const data = {};
 
-    if (dp == null) {
-      return res.status(400).json({ error: "discount_pct requerido" });
+    if (req.body.discount_pct != null) {
+      const pct = clamp(req.body.discount_pct, 0, 100);
+      data.discount_pct = pct;
     }
-    const v = Number(dp);
-    if (!Number.isFinite(v) || v < 0 || v > 100) {
-      return res.status(400).json({ error: "discount_pct debe estar entre 0 y 100" });
-    }
+    if (req.body.name != null) data.name = String(req.body.name);
+    if (req.body.billing_email != null) data.billing_email = String(req.body.billing_email);
 
-    const updated = await prisma.customer.update({
-      where: { id },
-      data: { discount_pct: v },
-    });
-
-    res.json({
-      id: updated.id,
-      discount_pct: toNum(updated.discount_pct) ?? 0,
-    });
+    const updated = await prisma.customer.update({ where: { id }, data });
+    res.json(customerOut(updated));
   } catch (e) {
-    console.error("PATCH /customers error", e);
-    res.status(500).json({ error: "update_failed" });
+    console.error("PATCH /customers/:id error", e);
+    res.status(500).json({ error: "patch_customer_failed" });
   }
 });
 
-/* ─────────── ORDERS ─────────── */
+// ───────────────────────── órdenes ─────────────────────────
 
-// GET /orders?status=&customer=&date=(week|month|thismonth)
+// Util para filtros de fecha
+function daterangeFromQuery(token) {
+  const now = new Date();
+  const end = now;
+  const start = new Date(now);
+
+  if (token === "week") {
+    start.setDate(now.getDate() - 7);
+    return { gte: start, lte: end };
+  }
+  if (token === "month") {
+    start.setMonth(now.getMonth() - 1);
+    return { gte: start, lte: end };
+  }
+  if (token === "thismonth") {
+    start.setDate(1);
+    return { gte: start, lte: end };
+  }
+  return null;
+}
+
+// GET /orders?status=&customer=&date=week|month|thismonth
 router.get("/orders", async (req, res) => {
   try {
     const qStatus = req.query.status?.toString();
@@ -169,10 +216,10 @@ router.get("/orders", async (req, res) => {
     const where = {};
 
     // Estado
-    const safe = toDbStatus(qStatus);
-    if (safe) where.status = safe;
+    const st = toDbStatus(qStatus);
+    if (st) where.status = st;
 
-    // Cliente (por nombre o id)
+    // Cliente (por nombre contiene o id exacto)
     if (qCustomer) {
       where.OR = [
         { customer: { name: { contains: qCustomer, mode: "insensitive" } } },
@@ -180,19 +227,9 @@ router.get("/orders", async (req, res) => {
       ];
     }
 
-    // Fechas
-    const now = new Date();
-    const start = new Date(now);
-    if (qDate === "week") {
-      start.setDate(now.getDate() - 7);
-    } else if (qDate === "month") {
-      start.setMonth(now.getMonth() - 1);
-    } else if (qDate === "thismonth") {
-      start.setDate(1);
-    }
-    if (["week", "month", "thismonth"].includes(qDate)) {
-      where.created_at = { gte: start, lte: now };
-    }
+    // Fecha
+    const range = daterangeFromQuery(qDate);
+    if (range) where.created_at = range;
 
     const orders = await prisma.order.findMany({
       where,
@@ -200,202 +237,193 @@ router.get("/orders", async (req, res) => {
       orderBy: { created_at: "desc" },
     });
 
-    // Totales por estado (en bultos); ready ≡ scheduled, processing ≡ in_production
+    // Totales de bultos por estado (en canónico)
     const totals_by_status = {};
-    const canonize = (s) => {
-      if (s === "in_production") return "processing";
-      if (s === "scheduled") return "ready";
-      return s;
-    };
+    for (const o of orders) {
+      const canon = toCanonStatus(o.status);
+      const bags = Number(o.total_bags || 0);
+      totals_by_status[canon] = (totals_by_status[canon] || 0) + bags;
+    }
 
-    const mapped = orders.map((o) => {
-      const total_bags = o.items.reduce((s, it) => {
-        // Aquí usamos qty_bags ya expresado en bultos (si almacenas unidades, adapta con 1T=25)
-        return s + Number(it.qty_bags || 0);
-      }, 0);
+    // Salida “friendly”
+    const out = orders.map((o) => ({
+      id: o.id,
+      status: toCanonStatus(o.status),
+      customer: o.customer ? customerOut(o.customer) : null,
+      subtotal: toIntCOP(o.subtotal),
+      discount_total: toIntCOP(o.discount_total),
+      total: toIntCOP(o.total),
+      total_bags: Number(o.total_bags || 0),
+      scheduled_at: o.scheduled_at,
+      ready_at: o.ready_at,
+      delivery_at: o.delivery_at,
+      created_at: o.created_at,
+      items: o.items.map((it) => ({
+        id: it.id,
+        product: it.product ? productOut(it.product) : null,
+        product_id: it.product_id,
+        qty_bags: Number(it.qty_bags || 0),
+      })),
+    }));
 
-      const canon = canonize(o.status);
-      totals_by_status[canon] = (totals_by_status[canon] || 0) + total_bags;
-
-      return {
-        id: o.id,
-        status: canon,
-        created_at: o.created_at,
-        scheduled_at: o.scheduled_at,
-        ready_at: o.ready_at,
-        delivery_at: o.delivery_at,
-        customer: o.customer ? { id: o.customer.id, name: o.customer.name } : null,
-        subtotal: toIntCOP(o.subtotal_cop),
-        discount_total: toIntCOP(o.discount_total_cop),
-        total: toIntCOP(o.total_cop),
-        items: o.items.map((it) => ({
-          id: it.id,
-          product_id: it.product_id,
-          sku: it.product?.sku,
-          name: it.product?.name,
-          pelletized: !!it.product?.pelletized,
-          qty_bags: Number(it.qty_bags || 0),
-          unit_price_cop: toIntCOP(it.unit_price_cop),
-        })),
-        total_bags,
-      };
-    });
-
-    res.json({ orders: mapped, totals_by_status });
+    res.json({ orders: out, totals_by_status });
   } catch (e) {
     console.error("GET /orders error", e);
-    res.status(500).json({ error: "list_failed" });
+    res.status(500).json({ error: "get_orders_failed" });
   }
 });
 
 // PATCH /orders/:id  { status }
 router.patch("/orders/:id", async (req, res) => {
   try {
-    const id = req.params.id;
-    const dbStatus = toDbStatus(req.body.status);
-    if (!dbStatus) return res.status(400).json({ error: "status inválido" });
+    const id = String(req.params.id);
+    const newStatus = toDbStatus(req.body?.status);
+    if (!newStatus) return res.status(400).json({ error: "invalid_status" });
 
     const updated = await prisma.order.update({
       where: { id },
-      data: { status: dbStatus },
+      data: { status: newStatus },
       include: { customer: true, items: { include: { product: true } } },
     });
 
     res.json({
       id: updated.id,
-      status: updated.status,
+      status: toCanonStatus(updated.status),
+      customer: updated.customer ? customerOut(updated.customer) : null,
+      subtotal: toIntCOP(updated.subtotal),
+      discount_total: toIntCOP(updated.discount_total),
+      total: toIntCOP(updated.total),
+      total_bags: Number(updated.total_bags || 0),
+      scheduled_at: updated.scheduled_at,
+      ready_at: updated.ready_at,
+      delivery_at: updated.delivery_at,
+      created_at: updated.created_at,
+      items: updated.items.map((it) => ({
+        id: it.id,
+        product: it.product ? productOut(it.product) : null,
+        product_id: it.product_id,
+        qty_bags: Number(it.qty_bags || 0),
+      })),
     });
   } catch (e) {
     console.error("PATCH /orders/:id error", e);
-    res.status(500).json({ error: "update_failed" });
+    res.status(500).json({ error: "patch_order_failed" });
   }
 });
 
-// POST /orders { customer_id, items:[{product_id, qty_bags}] }
+// POST /orders  { customer_id, items:[{product_id, qty_bags}] }
 router.post("/orders", async (req, res) => {
   try {
     const { customer_id, items } = req.body || {};
     if (!customer_id || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: "payload inválido" });
+      return res.status(400).json({ error: "invalid_payload" });
     }
 
     const customer = await prisma.customer.findUnique({ where: { id: customer_id } });
-    if (!customer) return res.status(400).json({ error: "cliente inexistente" });
+    if (!customer) return res.status(400).json({ error: "customer_not_found" });
 
-    // Carga de productos
-    const prodIds = items.map((i) => i.product_id);
-    const products = await prisma.product.findMany({ where: { id: { in: prodIds } } });
+    // Cargar productos
+    const prodIds = items.map((i) => String(i.product_id));
+    const products = await prisma.product.findMany({
+      where: { id: { in: prodIds } },
+    });
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    // Items para DB (qty_bags se interpreta ya en bultos)
-    const itemsForDb = [];
+    // Calcular totales
+    let subtotal = 0;
+    let total_bags = 0;
+
     for (const it of items) {
-      const p = byId.get(it.product_id);
-      if (!p) continue;
-      const qty = Math.max(0, Number(it.qty_bags || 0));
-      itemsForDb.push({
-        product_id: p.id,
-        qty_bags: qty,
-        unit_price_cop: Math.round(Number(p.price_per_bag || 0)),
-      });
+      const p = byId.get(String(it.product_id));
+      if (!p) return res.status(400).json({ error: "product_not_found", product_id: it.product_id });
+      const qty = Number(it.qty_bags || 0);
+      if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ error: "invalid_qty", product_id: it.product_id });
+
+      const unit = toIntCOP(p.price_per_bag);
+      subtotal += unit * qty;
+      total_bags += qty;
     }
-    if (itemsForDb.length === 0) return res.status(400).json({ error: "sin items válidos" });
 
-    // Totales
-    const subtotal = itemsForDb.reduce(
-      (s, it) => s + Number(it.qty_bags) * Number(it.unit_price_cop),
-      0
-    );
-    const discountPct = Number(customer.discount_pct || 0);
-    const discountTotal = Math.round((subtotal * discountPct) / 100);
-    const total = subtotal - discountTotal;
+    const discountPct = clamp(customer.discount_pct ?? 0, 0, 100);
+    const discount_total = Math.round((subtotal * discountPct) / 100);
+    const total = Math.max(0, subtotal - discount_total);
 
-    // Scheduling (pellet / no pellet)
-    const richItems = itemsForDb.map((it) => {
-      const p = byId.get(it.product_id);
-      return { product_id: it.product_id, pelletized: !!p?.pelletized, qty_bags: it.qty_bags };
-    });
-
+    // Scheduling (usa configuración simple desde env o defaults)
     const schedCfg = {
-      timezone: "America/Bogota",
-      workdays: "Mon,Tue,Wed,Thu,Fri,Sat",
-      workday_start: "08:00",
-      workday_end: "17:00",
-      dispatch_buffer_min: 60,
-      pellet_bph: 80,
-      non_pellet_bph: 80,
-      sat_workday_start: "08:00",
-      sat_workday_end: "11:00",
-      sat_pellet_bph: 60,
-      sat_non_pellet_bph: 60,
+      timezone: process.env.SCHED_TZ || "America/Bogota",
+      workdays: process.env.SCHED_WORKDAYS || "Mon,Tue,Wed,Thu,Fri,Sat",
+      dispatch_buffer_min: Number(process.env.SCHED_DISPATCH_BUFFER_MIN || 60),
+      pellet_bph: Number(process.env.SCHED_PELLET_BPH || 60),
+      non_pellet_bph: Number(process.env.SCHED_NON_PELLET_BPH || 60),
+      sat_pellet_bph: Number(process.env.SCHED_SAT_PELLET_BPH || 40),
+      sat_non_pellet_bph: Number(process.env.SCHED_SAT_NON_PELLET_BPH || 40),
+      workday_start: process.env.SCHED_START || "08:00",
+      workday_end:   process.env.SCHED_END   || "17:00",
+      sat_workday_start: process.env.SCHED_SAT_START || "08:00",
+      sat_workday_end:   process.env.SCHED_SAT_END   || "11:00",
     };
 
-    const sch = await scheduleOrderForItems(richItems, new Date(), schedCfg);
+    // Enriquecer items con pelletized para el scheduler
+    const schedItems = items.map((it) => {
+      const p = byId.get(String(it.product_id));
+      return {
+        product_id: it.product_id,
+        qty_bags: Number(it.qty_bags || 0),
+        pelletized: Boolean(p?.pelletized),
+        sku: p?.sku,
+      };
+    });
 
+    const { scheduled_at, ready_at, delivery_at } =
+      await scheduleOrderForItems(schedItems, new Date(), schedCfg);
+
+    // Crear orden
     const created = await prisma.order.create({
       data: {
         customer_id,
-        status: "pending_payment",
-        scheduled_at: sch.scheduled_at,
-        ready_at: sch.ready_at,
-        delivery_at: sch.delivery_at,
-        subtotal_cop: subtotal,
-        discount_total_cop: discountTotal,
-        total_cop: total,
-        items: { createMany: { data: itemsForDb } },
+        status: toDbStatus("pending_payment"),
+        subtotal,
+        discount_total,
+        total,
+        total_bags,
+        scheduled_at,
+        ready_at,
+        delivery_at,
+        items: {
+          create: items.map((it) => ({
+            product_id: String(it.product_id),
+            qty_bags: Number(it.qty_bags || 0),
+          })),
+        },
       },
-      include: { items: { include: { product: true } }, customer: true },
+      include: { customer: true, items: { include: { product: true } } },
     });
 
-    res.json({
+    res.status(201).json({
       order: {
         id: created.id,
-        status: created.status,
-        created_at: created.created_at,
+        status: toCanonStatus(created.status),
+        customer: created.customer ? customerOut(created.customer) : null,
+        subtotal: toIntCOP(created.subtotal),
+        discount_total: toIntCOP(created.discount_total),
+        total: toIntCOP(created.total),
+        total_bags: Number(created.total_bags || 0),
         scheduled_at: created.scheduled_at,
         ready_at: created.ready_at,
         delivery_at: created.delivery_at,
-        customer: created.customer
-          ? { id: created.customer.id, name: created.customer.name }
-          : null,
-        subtotal: toIntCOP(created.subtotal_cop),
-        discount_total: toIntCOP(created.discount_total_cop),
-        total: toIntCOP(created.total_cop),
+        created_at: created.created_at,
         items: created.items.map((it) => ({
           id: it.id,
+          product: it.product ? productOut(it.product) : null,
           product_id: it.product_id,
-          sku: it.product?.sku,
-          name: it.product?.name,
-          pelletized: !!it.product?.pelletized,
           qty_bags: Number(it.qty_bags || 0),
-          unit_price_cop: toIntCOP(it.unit_price_cop),
         })),
       },
     });
   } catch (e) {
     console.error("POST /orders error", e);
-    res.status(500).json({ error: "create_failed" });
+    res.status(500).json({ error: "create_order_failed" });
   }
 });
-
-/* ─────────── Catálogo: sync opcional ─────────── */
-async function fireCatalogSync(prod) {
-  try {
-    const { WA_CATALOG_SYNC_URL } = process.env;
-    if (!WA_CATALOG_SYNC_URL) return;
-    await fetch(WA_CATALOG_SYNC_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sku: prod.sku,
-        name: prod.name,
-        price_cop: Math.round(Number(prod.price_per_bag || 0)),
-        active: !!prod.active,
-      }),
-    });
-  } catch (e) {
-    console.error("fireCatalogSync error:", e?.message || e);
-  }
-}
 
 export default router;

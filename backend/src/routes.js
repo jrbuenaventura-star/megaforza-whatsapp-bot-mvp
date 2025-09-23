@@ -1,339 +1,178 @@
+// backend/src/routes.js
 import express from "express";
-import multer from "multer";
 import { prisma } from "./db.js";
 import { scheduleOrderForItems } from "./scheduler.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 
-const upload = multer({ dest: "uploads/" });
 export const router = express.Router();
 
-/* ───────────────────────── helpers ───────────────────────── */
+/* ─────────── Serializadores numéricos ─────────── */
+const toIntCOP = (v) => (v == null ? null : Math.round(Number(v)));
+const toNum    = (v) => (v == null ? null : Number(v));
 
-// Estados canónicos de la app (nuestro “vocabulario”)
-const CANON_STATUSES = [
-  "pending_payment",
-  "processing",   // mapea a in_production en BD si no existe processing
-  "ready",        // mapea a scheduled en BD si no existe ready
-  "delivered",
-  "canceled",
-];
+/* ─────────── Mapeo de estados canónicos ↔ enum BD ─────────── */
+const _statusEnum = (Prisma?.OrderStatus ?? OrderStatus ?? {});
+const _keys = Object.keys(_statusEnum);
+const _vals = Object.values(_statusEnum);
+const _has = (v) => _keys.includes(v) || _vals.includes(v);
+const _asEnum = (v) => _statusEnum[v] ?? v;
 
-// Sinónimos → canónico
-const STATUS_SYNONYMS = {
-  // pagos / producción
-  paid: "processing",
-  payment_received: "processing",
-  in_production: "processing",
-  "in-production": "processing",
-  produccion: "processing",
-  producción: "processing",
+/** Acepta: pending_payment|paid|processing|in_production|scheduled|ready|delivered|canceled */
+function toDbStatus(s) {
+  if (!s) return null;
+  const canon = String(s).trim().toLowerCase();
 
-  // programado / listo
-  scheduled: "ready",
-  programado: "ready",
-  listo: "ready",
+  // Normalizaciones
+  const map = {
+    pending: "pending_payment",
+    pending_payment: "pending_payment",
+    paid: "paid",
+    processing: "in_production",      // canónico → enum
+    in_production: "in_production",
+    scheduled: "scheduled",
+    ready: "scheduled",                // canónico UI → enum
+    delivered: "delivered",
+    canceled: "canceled",
+    cancelled: "canceled",
+  };
 
-  // cancelaciones (GB)
-  cancelled: "canceled",
-  cancel: "canceled",
-
-  // pendientes
-  pending: "pending_payment",
-  awaiting_payment: "pending_payment",
-};
-
-/** Convierte el input a estado canónico (string) o null. */
-function canonStatus(input) {
-  if (!input) return null;
-  const raw = String(input).trim().toLowerCase();
-  const canon = STATUS_SYNONYMS[raw] ?? raw;
-  return CANON_STATUSES.includes(canon) ? canon : null;
+  const picked = map[canon] || canon;
+  if (_has(picked)) return _asEnum(picked);
+  return null;
 }
 
-/**
- * Devuelve el valor que **sí acepta la BD**:
- * - Si la BD ya tiene ese valor exacto, úsalo.
- * - Si no, mapea:
- *    processing  -> in_production
- *    ready       -> scheduled
- * - Si la BD ya usa processing/ready, respeta eso.
- * - Si nada calza, retorna null.
- */
-function toDbStatus(input) {
-  const canon = canonStatus(input);
-  if (!canon) return null;
-
-  const statusEnum = (Prisma?.OrderStatus ?? OrderStatus ?? {});
-  const enumKeys = Object.keys(statusEnum);
-  const enumVals = Object.values(statusEnum);
-
-  const has = (val) => enumKeys.includes(val) || enumVals.includes(val);
-  const asEnum = (val) => statusEnum[val] ?? val;
-
-  if (has(canon)) return asEnum(canon);
-
-  const forwardMap = { processing: "in_production", ready: "scheduled" };
-  const backMap    = { in_production: "processing", scheduled: "ready" };
-
-  if (forwardMap[canon] && has(forwardMap[canon])) return asEnum(forwardMap[canon]);
-  if (backMap[canon]    && has(backMap[canon]))    return asEnum(backMap[canon]);
-
-  return has(canon) ? asEnum(canon) : null;
+/* ─────────── Aux: bultos (SKU 1T ⇒ 25 bultos por unidad) ─────────── */
+function bagsForItem(it) {
+  const sku = it?.sku || it?.product?.sku || "";
+  const perUnit = typeof sku === "string" && sku.trim().endsWith("1T") ? 25 : 1;
+  return Number(it?.qty_bags || 0) * perUnit; // si ya viene en bultos, qty_bags; si se usa qty_unidades, adaptar aquí
 }
 
-const toIntCOP = v => (v == null ? null : Math.round(Number(v)));
-const toNum    = v => (v == null ? null : Number(v));
+/* ─────────── HEALTH ─────────── */
+router.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Sanitiza número en request
-function asNumberOrNull(v) {
-  if (v === undefined || v === null || v === "") return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
+/* ─────────── PRODUCTS ─────────── */
 
-// ── Sync Catálogo WA (usa sku como retailer_id) ──
-async function syncWhatsAppCatalogPrice(product) {
-  try {
-    const {
-      WA_CATALOG_SYNC_URL,            // opcional: tu propio webhook/worker
-      WA_CATALOG_ID,                  // catálogo de Commerce Manager
-      WA_SYSTEM_ACCESS_TOKEN,         // token de sistema/app
-      WA_GRAPH_API_VERSION = "v20.0", // versión Graph
-    } = process.env;
-
-    const sku = product?.sku;
-    const price = toIntCOP(product?.price_per_bag);
-
-    if (!sku || !Number.isFinite(price)) return;
-
-    // 1) Si tienes un worker propio, úsalo y deja que él maneje retries, logs, etc.
-    if (WA_CATALOG_SYNC_URL) {
-      await fetch(WA_CATALOG_SYNC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sku, price_cop: price }),
-      });
-      return;
-    }
-
-    // 2) Sync directo al Graph API (Commerce Manager batch)
-    if (!WA_CATALOG_ID || !WA_SYSTEM_ACCESS_TOKEN) return;
-
-    // Asumimos que en el catálogo el retailer_id == sku
-    const url = `https://graph.facebook.com/${WA_GRAPH_API_VERSION}/${WA_CATALOG_ID}/batch`;
-    const requests = [
-      {
-        method: "UPDATE",
-        // actualizar por retailer_id (sku)
-        relative_url: `products?retailer_id=${encodeURIComponent(sku)}`,
-        // Precio como "<valor> COP"
-        body: `price=${encodeURIComponent(price + " COP")}`,
-      },
-    ];
-
-    const r = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${WA_SYSTEM_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ requests }),
-    });
-
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      throw new Error(`WA Catalog sync failed: ${r.status} ${JSON.stringify(data)}`);
-    }
-  } catch (e) {
-    console.warn("No se pudo sincronizar con Catálogo de WhatsApp:", e?.message || e);
-  }
-}
-
-/* ───────────────────────── endpoints ───────────────────────── */
-
-router.get("/health", (req, res) => res.json({ ok: true }));
-
-/* ───────── Productos ───────── */
-
-// Lista productos (por defecto activos). Si quieres todos, pásale ?all=1
+// GET /products?all=1  (si no, solo activos)
 router.get("/products", async (req, res) => {
-  const showAll = String(req.query.all || "").trim() === "1";
-  const where = showAll ? {} : { active: true };
-
-  const products = await prisma.product.findMany({
+  const all = req.query.all === "1" || req.query.all === "true";
+  const where = all ? {} : { active: true };
+  const prods = await prisma.product.findMany({
     where,
     orderBy: { name: "asc" },
   });
 
-  res.json(
-    products.map((p) => ({
-      ...p,
-      price_per_bag: toIntCOP(p.price_per_bag),
-    }))
-  );
+  const out = prods.map((p) => ({
+    id: p.id,
+    sku: p.sku,
+    name: p.name,
+    active: !!p.active,
+    pelletized: !!p.pelletized,
+    price_per_bag: toIntCOP(p.price_per_bag), // number entero COP
+  }));
+
+  res.json(out);
 });
 
-// Actualiza precio (COP entero) y/o estado activo; dispara sync a catálogo
+// PATCH /products/:id  { price_per_bag?, active? }
 router.patch("/products/:id", async (req, res) => {
   try {
     const id = req.params.id;
-    const rawPrice = req.body?.price_per_bag;
-    const rawActive = req.body?.active;
-
     const data = {};
 
-    if (rawPrice !== undefined) {
-      const n = Number(rawPrice);
-      if (!Number.isFinite(n) || n < 0) {
-        return res.status(400).json({ error: "price_per_bag debe ser un número ≥ 0" });
+    if (req.body.price_per_bag != null) {
+      const v = Number(req.body.price_per_bag);
+      if (!Number.isFinite(v) || v < 0) {
+        return res.status(400).json({ error: "price_per_bag inválido" });
       }
-      const asInt = Math.round(n); // COP enteros
-      data.price_per_bag = new Prisma.Decimal(asInt);
+      data.price_per_bag = Math.round(v);
     }
+    if (req.body.active != null) data.active = !!req.body.active;
 
-    if (rawActive !== undefined) {
-      data.active = Boolean(rawActive);
-    }
+    const updated = await prisma.product.update({
+      where: { id },
+      data,
+    });
 
-    if (Object.keys(data).length === 0) {
-      return res.status(400).json({ error: "Nada que actualizar" });
-    }
+    // Dispara sync de catálogo (opcional)
+    await fireCatalogSync(updated);
 
-    const p = await prisma.product.update({ where: { id }, data });
-
-    // Sync catálogo (best-effort, no bloquea)
-    try { await syncWhatsAppCatalogPrice(p); } catch {}
-
-    res.json({ ...p, price_per_bag: toIntCOP(p.price_per_bag) });
+    res.json({
+      id: updated.id,
+      sku: updated.sku,
+      name: updated.name,
+      active: !!updated.active,
+      price_per_bag: toIntCOP(updated.price_per_bag),
+    });
   } catch (e) {
-    console.error("PATCH /products/:id error", e);
-    res.status(500).json({ error: "Error actualizando producto" });
+    console.error("PATCH /products error", e);
+    res.status(500).json({ error: "update_failed" });
   }
 });
 
-/* ───────── Capacidad ───────── */
+/* ─────────── CUSTOMERS ─────────── */
 
-router.get("/config/capacity", async (req, res) => {
-  const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
-  res.json(cfg);
-});
-
-router.post("/config/capacity", async (req, res) => {
-  const data = req.body;
-  const cfg = await prisma.capacityConfig.upsert({
-    where: { id: 1 },
-    update: data,
-    create: { id: 1, ...data },
-  });
-  res.json(cfg);
-});
-
-/* ───────── Clientes ───────── */
-
-// Listado con búsqueda básica
-router.get("/customers", async (req, res) => {
-  const q = req.query.q?.toString() || "";
-  const customers = await prisma.customer.findMany({
-    where: {
-      OR: [
-        { name: { contains: q, mode: "insensitive" } },
-        { whatsapp_phone: { contains: q } },
-        { doc_number: { contains: q } },
-      ],
-    },
+router.get("/customers", async (_req, res) => {
+  const cs = await prisma.customer.findMany({
     orderBy: { created_at: "desc" },
   });
-
-  res.json(
-    customers.map((c) => ({
-      ...c,
-      discount_pct: toNum(c.discount_pct),
-    }))
-  );
+  const out = cs.map((c) => ({
+    id: c.id,
+    name: c.name,
+    whatsapp_phone: c.whatsapp_phone,
+    doc_type: c.doc_type,
+    doc_number: c.doc_number,
+    billing_email: c.billing_email,
+    discount_pct: toNum(c.discount_pct) ?? 0,
+  }));
+  res.json(out);
 });
 
-router.post(
-  "/customers",
-  upload.fields([{ name: "rut" }, { name: "camara" }]),
-  async (req, res) => {
-    try {
-      const {
-        name,
-        doc_type,
-        doc_number,
-        nit_dv,
-        billing_email,
-        whatsapp_phone,
-        discount_pct,
-      } = req.body;
-
-      const rut = req.files?.rut?.[0]?.path || null;
-      const cam = req.files?.camara?.[0]?.path || null;
-
-      let d = asNumberOrNull(discount_pct);
-      d = d == null ? 0 : Math.min(100, Math.max(0, d)); // clamp 0–100
-
-      const c = await prisma.customer.create({
-        data: {
-          name,
-          doc_type,
-          doc_number,
-          nit_dv,
-          billing_email,
-          whatsapp_phone,
-          discount_pct: new Prisma.Decimal(Number(d).toFixed(2)),
-          rut_url: rut,
-          camara_url: cam,
-        },
-      });
-
-      res.json({ ...c, discount_pct: toNum(c.discount_pct) });
-    } catch (e) {
-      console.error("POST /customers error", e);
-      res.status(500).json({ error: "Error creando cliente" });
-    }
-  }
-);
-
-// Solo actualizar descuento (%)
+// PATCH /customers/:id  { discount_pct }
 router.patch("/customers/:id", async (req, res) => {
   try {
     const id = req.params.id;
-    const d = asNumberOrNull(req.body.discount_pct);
+    const dp = req.body.discount_pct;
 
-    if (d === null) {
+    if (dp == null) {
       return res.status(400).json({ error: "discount_pct requerido" });
     }
-    if (d < 0 || d > 100) {
+    const v = Number(dp);
+    if (!Number.isFinite(v) || v < 0 || v > 100) {
       return res.status(400).json({ error: "discount_pct debe estar entre 0 y 100" });
     }
 
-    const c = await prisma.customer.update({
+    const updated = await prisma.customer.update({
       where: { id },
-      data: { discount_pct: new Prisma.Decimal(Number(d).toFixed(2)) },
+      data: { discount_pct: v },
     });
 
-    res.json({ ...c, discount_pct: toNum(c.discount_pct) });
+    res.json({
+      id: updated.id,
+      discount_pct: toNum(updated.discount_pct) ?? 0,
+    });
   } catch (e) {
-    console.error("PATCH /customers/:id error", e);
-    res.status(500).json({ error: "Error actualizando cliente" });
+    console.error("PATCH /customers error", e);
+    res.status(500).json({ error: "update_failed" });
   }
 });
 
-/* ───────── Pedidos ───────── */
+/* ─────────── ORDERS ─────────── */
 
+// GET /orders?status=&customer=&date=(week|month|thismonth)
 router.get("/orders", async (req, res) => {
   try {
-    const qStatus   = req.query.status?.toString();
+    const qStatus = req.query.status?.toString();
     const qCustomer = req.query.customer?.toString();
-    const qDate     = req.query.date?.toString(); // "week" | "month" | "thismonth"
+    const qDate = req.query.date?.toString();
 
     const where = {};
-    // estado (usa tu mapeo existente)
+
+    // Estado
     const safe = toDbStatus(qStatus);
     if (safe) where.status = safe;
 
-    // cliente (por nombre o por id)
+    // Cliente (por nombre o id)
     if (qCustomer) {
       where.OR = [
         { customer: { name: { contains: qCustomer, mode: "insensitive" } } },
@@ -341,7 +180,7 @@ router.get("/orders", async (req, res) => {
       ];
     }
 
-    // rango de fechas por created_at
+    // Fechas
     const now = new Date();
     const start = new Date(now);
     if (qDate === "week") {
@@ -361,144 +200,202 @@ router.get("/orders", async (req, res) => {
       orderBy: { created_at: "desc" },
     });
 
-    // Totales de bultos por estado (canónico)
+    // Totales por estado (en bultos); ready ≡ scheduled, processing ≡ in_production
     const totals_by_status = {};
-    for (const o of orders) {
-      const canon = o.status === "in_production" ? "processing"
-                  : o.status === "scheduled"     ? "ready"
-                  : o.status;
-      totals_by_status[canon] = (totals_by_status[canon] || 0) + (o.total_bags || 0);
-    }
+    const canonize = (s) => {
+      if (s === "in_production") return "processing";
+      if (s === "scheduled") return "ready";
+      return s;
+    };
 
-    res.json({ orders, totals_by_status });
+    const mapped = orders.map((o) => {
+      const total_bags = o.items.reduce((s, it) => {
+        // Aquí usamos qty_bags ya expresado en bultos (si almacenas unidades, adapta con 1T=25)
+        return s + Number(it.qty_bags || 0);
+      }, 0);
+
+      const canon = canonize(o.status);
+      totals_by_status[canon] = (totals_by_status[canon] || 0) + total_bags;
+
+      return {
+        id: o.id,
+        status: canon,
+        created_at: o.created_at,
+        scheduled_at: o.scheduled_at,
+        ready_at: o.ready_at,
+        delivery_at: o.delivery_at,
+        customer: o.customer ? { id: o.customer.id, name: o.customer.name } : null,
+        subtotal: toIntCOP(o.subtotal_cop),
+        discount_total: toIntCOP(o.discount_total_cop),
+        total: toIntCOP(o.total_cop),
+        items: o.items.map((it) => ({
+          id: it.id,
+          product_id: it.product_id,
+          sku: it.product?.sku,
+          name: it.product?.name,
+          pelletized: !!it.product?.pelletized,
+          qty_bags: Number(it.qty_bags || 0),
+          unit_price_cop: toIntCOP(it.unit_price_cop),
+        })),
+        total_bags,
+      };
+    });
+
+    res.json({ orders: mapped, totals_by_status });
   } catch (e) {
     console.error("GET /orders error", e);
-    res.status(500).json({ error: "Error listando pedidos" });
+    res.status(500).json({ error: "list_failed" });
   }
 });
 
-
-router.post("/orders", async (req, res) => {
-  try {
-    const { customer_id, items } = req.body;
-    const customer = await prisma.customer.findUnique({ where: { id: customer_id } });
-    if (!customer) return res.status(400).json({ error: "Customer not found" });
-
-    const prods = await prisma.product.findMany({
-      where: { id: { in: items.map((i) => i.product_id) } },
-    });
-    const prodsMap = new Map(prods.map((p) => [p.id, p]));
-    const cfg = await prisma.capacityConfig.findUnique({ where: { id: 1 } });
-
-    let subtotal = 0, discount_total = 0, total_bags = 0;
-    const orderItemsData = [];
-    for (const it of items) {
-      const p = prodsMap.get(it.product_id);
-      if (!p) continue;
-      const qty = Number(it.qty_bags);
-      total_bags += qty;
-      const unitPrice = toIntCOP(p.price_per_bag);
-      const discountPct = Number(customer.discount_pct || 0);
-      const line = qty * unitPrice * (discountPct ? 1 - discountPct / 100 : 1);
-      subtotal += qty * unitPrice;
-      discount_total += qty * unitPrice * (discountPct / 100);
-      orderItemsData.push({
-        product_id: p.id,
-        qty_bags: qty,
-        unit_price: unitPrice,
-        discount_pct_applied: discountPct,
-        line_total: line,
-      });
-    }
-    const total = subtotal - discount_total;
-
-    const DEFAULT_STATUS = toDbStatus("pending_payment");
-
-    const order = await prisma.order.create({
-      data: {
-        customer_id,
-        status: DEFAULT_STATUS,
-        total_bags,
-        subtotal,
-        discount_total,
-        total,
-        items: { create: orderItemsData },
-      },
-      include: { items: { include: { product: true } } },
-    });
-
-    const enriched = order.items.map((i) => ({
-  qty_bags: i.qty_bags,
-  pelletized: i.product.pelletized,
-  sku: i.product.sku,
-}));
-
-    const sch = await scheduleOrderForItems(enriched, new Date(), cfg);
-    await prisma.order.update({
-      where: { id: order.id },
-      data: { scheduled_at: sch.scheduled_at, ready_at: sch.ready_at },
-    });
-
-    res.json({ order, estimated_delivery_at: sch.delivery_at });
-  } catch (e) {
-    console.error("POST /orders error", e);
-    res.status(500).json({ error: "Error creando orden" });
-  }
-});
-
-// Actualizar estado de una orden
+// PATCH /orders/:id  { status }
 router.patch("/orders/:id", async (req, res) => {
   try {
-    const { status } = req.body;
-    const dbStatus = toDbStatus(status);
-    if (!dbStatus) {
-      return res
-        .status(400)
-        .json({ error: `status inválido. Use: ${CANON_STATUSES.join(", ")}` });
-    }
+    const id = req.params.id;
+    const dbStatus = toDbStatus(req.body.status);
+    if (!dbStatus) return res.status(400).json({ error: "status inválido" });
 
-    const order = await prisma.order.update({
-      where: { id: req.params.id },
+    const updated = await prisma.order.update({
+      where: { id },
       data: { status: dbStatus },
-      include: { customer: true, items: true },
+      include: { customer: true, items: { include: { product: true } } },
     });
-    res.json(order);
+
+    res.json({
+      id: updated.id,
+      status: updated.status,
+    });
   } catch (e) {
     console.error("PATCH /orders/:id error", e);
-    res.status(500).json({ error: "Error actualizando estado" });
+    res.status(500).json({ error: "update_failed" });
   }
 });
 
-router.post("/orders/:id/markDelivered", async (req, res) => {
-  const safe = toDbStatus("delivered");
-  const o = await prisma.order.update({
-    where: { id: req.params.id },
-    data: { status: safe },
-  });
-  res.json(o);
-});
-
-// Reporte: pendiente por cliente
-router.get("/reports/pendingByCustomer", async (req, res) => {
-  const pendingSet = ["pending_payment", "processing", "ready"]; // canónicos
-  const pendingForDb = pendingSet
-    .map((s) => toDbStatus(s))
-    .filter(Boolean);
-
-  const orders = await prisma.order.findMany({
-    where: { status: { in: pendingForDb } },
-    include: { customer: true, items: { include: { product: true } } },
-    orderBy: { created_at: "asc" },
-  });
-
-  const report = {};
-  for (const o of orders) {
-    const cust = o.customer.name;
-    if (!report[cust]) report[cust] = {};
-    for (const it of o.items) {
-      const prod = it.product.name;
-      report[cust][prod] = (report[cust][prod] || 0) + it.qty_bags;
+// POST /orders { customer_id, items:[{product_id, qty_bags}] }
+router.post("/orders", async (req, res) => {
+  try {
+    const { customer_id, items } = req.body || {};
+    if (!customer_id || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "payload inválido" });
     }
+
+    const customer = await prisma.customer.findUnique({ where: { id: customer_id } });
+    if (!customer) return res.status(400).json({ error: "cliente inexistente" });
+
+    // Carga de productos
+    const prodIds = items.map((i) => i.product_id);
+    const products = await prisma.product.findMany({ where: { id: { in: prodIds } } });
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    // Items para DB (qty_bags se interpreta ya en bultos)
+    const itemsForDb = [];
+    for (const it of items) {
+      const p = byId.get(it.product_id);
+      if (!p) continue;
+      const qty = Math.max(0, Number(it.qty_bags || 0));
+      itemsForDb.push({
+        product_id: p.id,
+        qty_bags: qty,
+        unit_price_cop: Math.round(Number(p.price_per_bag || 0)),
+      });
+    }
+    if (itemsForDb.length === 0) return res.status(400).json({ error: "sin items válidos" });
+
+    // Totales
+    const subtotal = itemsForDb.reduce(
+      (s, it) => s + Number(it.qty_bags) * Number(it.unit_price_cop),
+      0
+    );
+    const discountPct = Number(customer.discount_pct || 0);
+    const discountTotal = Math.round((subtotal * discountPct) / 100);
+    const total = subtotal - discountTotal;
+
+    // Scheduling (pellet / no pellet)
+    const richItems = itemsForDb.map((it) => {
+      const p = byId.get(it.product_id);
+      return { product_id: it.product_id, pelletized: !!p?.pelletized, qty_bags: it.qty_bags };
+    });
+
+    const schedCfg = {
+      timezone: "America/Bogota",
+      workdays: "Mon,Tue,Wed,Thu,Fri,Sat",
+      workday_start: "08:00",
+      workday_end: "17:00",
+      dispatch_buffer_min: 60,
+      pellet_bph: 80,
+      non_pellet_bph: 80,
+      sat_workday_start: "08:00",
+      sat_workday_end: "11:00",
+      sat_pellet_bph: 60,
+      sat_non_pellet_bph: 60,
+    };
+
+    const sch = await scheduleOrderForItems(richItems, new Date(), schedCfg);
+
+    const created = await prisma.order.create({
+      data: {
+        customer_id,
+        status: "pending_payment",
+        scheduled_at: sch.scheduled_at,
+        ready_at: sch.ready_at,
+        delivery_at: sch.delivery_at,
+        subtotal_cop: subtotal,
+        discount_total_cop: discountTotal,
+        total_cop: total,
+        items: { createMany: { data: itemsForDb } },
+      },
+      include: { items: { include: { product: true } }, customer: true },
+    });
+
+    res.json({
+      order: {
+        id: created.id,
+        status: created.status,
+        created_at: created.created_at,
+        scheduled_at: created.scheduled_at,
+        ready_at: created.ready_at,
+        delivery_at: created.delivery_at,
+        customer: created.customer
+          ? { id: created.customer.id, name: created.customer.name }
+          : null,
+        subtotal: toIntCOP(created.subtotal_cop),
+        discount_total: toIntCOP(created.discount_total_cop),
+        total: toIntCOP(created.total_cop),
+        items: created.items.map((it) => ({
+          id: it.id,
+          product_id: it.product_id,
+          sku: it.product?.sku,
+          name: it.product?.name,
+          pelletized: !!it.product?.pelletized,
+          qty_bags: Number(it.qty_bags || 0),
+          unit_price_cop: toIntCOP(it.unit_price_cop),
+        })),
+      },
+    });
+  } catch (e) {
+    console.error("POST /orders error", e);
+    res.status(500).json({ error: "create_failed" });
   }
-  res.json(report);
 });
+
+/* ─────────── Catálogo: sync opcional ─────────── */
+async function fireCatalogSync(prod) {
+  try {
+    const { WA_CATALOG_SYNC_URL } = process.env;
+    if (!WA_CATALOG_SYNC_URL) return;
+    await fetch(WA_CATALOG_SYNC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sku: prod.sku,
+        name: prod.name,
+        price_cop: Math.round(Number(prod.price_per_bag || 0)),
+        active: !!prod.active,
+      }),
+    });
+  } catch (e) {
+    console.error("fireCatalogSync error:", e?.message || e);
+  }
+}
+
+export default router;

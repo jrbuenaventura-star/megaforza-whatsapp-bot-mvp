@@ -217,16 +217,89 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (session.state === "REG_EMAIL") {
-        session.draft.billing_email = t;
+  session.draft.billing_email = t;
 
-        await prisma.customer.create({
-          data: {
-            name: session.draft.name,
-            whatsapp_phone: from,
-            tax_id: session.draft.tax_id,
-            billing_email: session.draft.billing_email,
-          },
-        });
+  const waId = from;                                  // "5730..."
+  const name = (session.draft.name || "").trim();
+  const billing_email = (session.draft.billing_email || "").trim();
+
+  // Lo que venías guardando como tax_id lo usamos como doc_number
+  const doc_number_raw = (session.draft.tax_id || "").trim();
+
+  // Usa el doc_type capturado; si no, infiere: NIT si es largo numérico, si no CEDULA
+  const allowed = ["CEDULA", "NIT", "PASAPORTE", "CE"];
+  const doc_type = allowed.includes(session.draft.doc_type)
+    ? session.draft.doc_type
+    : (/^\d{9,}$/.test(doc_number_raw) ? "NIT" : "CEDULA");
+
+  const doc_number = doc_number_raw;
+
+  // Crear/actualizar por whatsapp_phone (único)
+  await prisma.customer.upsert({
+    where:  { whatsapp_phone: waId },
+    update: { name, billing_email, doc_number, doc_type },
+    create: { name, whatsapp_phone: waId, billing_email, doc_number, doc_type },
+  });
+
+  // Confirmación + catálogo
+  await sendText(waId,
+    `¡Listo, ${name}! Ya quedaste registrad@ ✅\n` +
+    `Ahora puedes hacer tu pedido desde nuestro catálogo.`
+  );
+
+        
+  const products = await prisma.product.findMany({
+    where: { active: true },
+    orderBy: { name: "asc" },
+    take: 30, // máximo permitido por WA para product_list
+  });
+  const items = products.map(p => ({ product_retailer_id: p.sku }));
+  await sendInteractiveProductList(waId, process.env.WHATSAPP_CATALOG_ID, items);
+
+  // Limpia estado y CORTA aquí para NO caer al saludo genérico
+  session.state = null;
+  session.draft = {};
+  return res.sendStatus(200);
+}
+
+async function sendText(to, text) {
+  await fetch(`https://graph.facebook.com/v19.0/${process.env.WHATSAPP_BUSINESS_NUMBER}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      text: { body: text },
+    }),
+  });
+}
+
+async function sendInteractiveProductList(to, catalog_id, product_items) {
+  await fetch(`https://graph.facebook.com/v19.0/${process.env.WHATSAPP_BUSINESS_NUMBER}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "product_list",
+        header: { type: "text", text: "Catálogo Megaforza" },
+        body:   { text: "Selecciona tus productos y cantidades." },
+        action: { catalog_id, product_items },
+      },
+    }),
+  });
+}
+
+
+      
 
         sessions.delete(from);
         await sendText(

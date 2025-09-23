@@ -323,16 +323,60 @@ router.patch("/customers/:id", async (req, res) => {
 /* ───────── Pedidos ───────── */
 
 router.get("/orders", async (req, res) => {
-  const qStatus = req.query.status?.toString();
-  const safe = toDbStatus(qStatus);
-  const where = safe ? { status: safe } : {};
-  const orders = await prisma.order.findMany({
-    where,
-    include: { customer: true, items: { include: { product: true } } },
-    orderBy: { created_at: "desc" },
-  });
-  res.json(orders);
+  try {
+    const qStatus   = req.query.status?.toString();
+    const qCustomer = req.query.customer?.toString();
+    const qDate     = req.query.date?.toString(); // "week" | "month" | "thismonth"
+
+    const where = {};
+    // estado (usa tu mapeo existente)
+    const safe = toDbStatus(qStatus);
+    if (safe) where.status = safe;
+
+    // cliente (por nombre o por id)
+    if (qCustomer) {
+      where.OR = [
+        { customer: { name: { contains: qCustomer, mode: "insensitive" } } },
+        { customer_id: qCustomer },
+      ];
+    }
+
+    // rango de fechas por created_at
+    const now = new Date();
+    const start = new Date(now);
+    if (qDate === "week") {
+      start.setDate(now.getDate() - 7);
+    } else if (qDate === "month") {
+      start.setMonth(now.getMonth() - 1);
+    } else if (qDate === "thismonth") {
+      start.setDate(1);
+    }
+    if (["week", "month", "thismonth"].includes(qDate)) {
+      where.created_at = { gte: start, lte: now };
+    }
+
+    const orders = await prisma.order.findMany({
+      where,
+      include: { customer: true, items: { include: { product: true } } },
+      orderBy: { created_at: "desc" },
+    });
+
+    // Totales de bultos por estado (canónico)
+    const totals_by_status = {};
+    for (const o of orders) {
+      const canon = o.status === "in_production" ? "processing"
+                  : o.status === "scheduled"     ? "ready"
+                  : o.status;
+      totals_by_status[canon] = (totals_by_status[canon] || 0) + (o.total_bags || 0);
+    }
+
+    res.json({ orders, totals_by_status });
+  } catch (e) {
+    console.error("GET /orders error", e);
+    res.status(500).json({ error: "Error listando pedidos" });
+  }
 });
+
 
 router.post("/orders", async (req, res) => {
   try {

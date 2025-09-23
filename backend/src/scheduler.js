@@ -60,25 +60,29 @@ function effectiveCfgFor(jsDate, cfg) {
   const token = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(jsDate);
   const isSat = token === "Sat";
 
-  const pick = (satKey, defKey) => {
-    const satVal = cfg?.[satKey];
-    return isSat && satVal != null && satVal !== "" ? satVal : cfg?.[defKey];
-  };
+  // Defaults generales
+  const defStart = cfg?.workday_start || "08:00";
+  const defEnd   = cfg?.workday_end   || "17:00";
+
+  // Sábado: si no hay config específica, por defecto cierra a las 12:00
+  const satStart = cfg?.sat_workday_start ?? defStart;
+  const satEnd   = cfg?.sat_workday_end   ?? "12:00";
 
   return {
     timezone: tz,
     workdays: cfg?.workdays || "Mon,Tue,Wed,Thu,Fri,Sat",
     dispatch_buffer_min: Number(cfg?.dispatch_buffer_min || 60),
 
-    // capacidades
-    pellet_bph: Number(pick("sat_pellet_bph", "pellet_bph") || 0),
-    non_pellet_bph: Number(pick("sat_non_pellet_bph", "non_pellet_bph") || 0),
+    // capacidades (si hay variantes de sábado, úsalas; si no, hereda las generales)
+    pellet_bph: Number((isSat ? (cfg?.sat_pellet_bph ?? cfg?.pellet_bph) : cfg?.pellet_bph) || 0),
+    non_pellet_bph: Number((isSat ? (cfg?.sat_non_pellet_bph ?? cfg?.non_pellet_bph) : cfg?.non_pellet_bph) || 0),
 
-    // horario de ese día
-    workday_start: pick("sat_workday_start", "workday_start") || "08:00",
-    workday_end: pick("sat_workday_end", "workday_end") || "17:00",
+    // horario efectivo del día
+    workday_start: isSat ? satStart : defStart,
+    workday_end:   isSat ? satEnd   : defEnd,
   };
 }
+
 
 /* ─────────────────── jornada laboral y suma de horas ─────────────────── */
 

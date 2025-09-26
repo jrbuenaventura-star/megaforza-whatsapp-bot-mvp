@@ -185,7 +185,7 @@ async function handleCatalogOrder(waId, msg) {
     itemsForDb.push({
       product_id: p.id,
       qty_bags: bags,
-      unit_price_cop: Number(p.price_per_bag),
+      unit_price: Number(p.price_per_bag),
     });
   }
 

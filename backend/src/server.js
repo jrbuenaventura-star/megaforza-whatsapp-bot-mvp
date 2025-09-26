@@ -235,9 +235,9 @@ async function handleCatalogOrder(waId, msg) {
       status: "pending_payment",
       scheduled_at: sch.scheduled_at,
       ready_at: sch.ready_at,
-      subtotal_cop: subtotal,
-      discount_total_cop: discountTotal,
-      total_cop: total,
+      subtotal: subtotal,
+      discount_total: discountTotal,
+      total: total,
       items: { createMany: { data: itemsForDb } },
     },
     include: { items: true, customer: true },
@@ -307,7 +307,7 @@ async function handleSkuOrder(waId, text) {
     itemsForDb.push({
       product_id: p.id,
       qty_bags: bags,
-      unit_price_cop: Number(p.price_per_bag),
+      unit_price: Number(p.price_per_bag), // entero COP
     });
     richItems.push({
       product_id: p.id,
@@ -357,7 +357,7 @@ async function handleSkuOrder(waId, text) {
     `Subtotal: $${subtotal.toLocaleString("es-CO")}\n` +
     (discountTotal > 0 ? `Descuento: $${discountTotal.toLocaleString("es-CO")}\n` : "") +
     `Total: $${total.toLocaleString("es-CO")}\n` +
-    `Entrega estimada: ${new Date(created.delivery_at).toLocaleString("es-CO")}`
+    `Entrega estimada: ${new Date(sch.delivery_at).toLocaleString("es-CO")}`
   );
 
   // Cierra modo ORDER_SKU

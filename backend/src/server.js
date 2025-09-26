@@ -27,19 +27,17 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-// Logger simple (para evitar dependencia morgan)
+// Logger simple (evita dependencia extra)
 app.use((req, _res, next) => {
   console.log(`${req.method} ${req.path}`);
   next();
 });
 
-// Monta API REST
+// Monta API REST (¡nombre ya usado en tu repo!)
 app.use("/api", api);
 
 /* ========= Sesiones simples en memoria ========= */
 const sessions = new Map();
-// Estructura típica:
-// sessions.set(waId, { state: "...", draft: { ... } })
 // States: MENU, REG_NAME, REG_TAX, REG_EMAIL, REG_RUT, ORDER_SKU
 
 /* ========= Helpers WhatsApp ========= */
@@ -139,7 +137,7 @@ async function finalizeRegistration(waId, session) {
   );
   await pushCatalog(waId);
 
-  // Ofrece también modo SKU
+  // Modo SKU (adicional)
   await sendText(
     waId,
     `Si prefieres escribir tu pedido:\n` +
@@ -174,18 +172,19 @@ async function handleCatalogOrder(waId, msg) {
   const dbProducts = await prisma.product.findMany({ where: { sku: { in: skuList } } });
   const bySKU = new Map(dbProducts.map((p) => [p.sku, p]));
 
-  // Construir items para BD
+  // Construir items para BD (unit_price + line_total obligatorios)
   const itemsForDb = [];
   for (const it of orderItems) {
     const p = bySKU.get(it.product_retailer_id);
     if (!p) continue;
     const qtyWhatsApp = Number(it.quantity || 0);
     const bags = p.sku?.endsWith("1T") ? qtyWhatsApp * 25 : qtyWhatsApp;
-
+    const unit = Number(p.price_per_bag);
     itemsForDb.push({
       product_id: p.id,
       qty_bags: bags,
-      unit_price: Number(p.price_per_bag),
+      unit_price: unit,
+      line_total: bags * unit,
     });
   }
 
@@ -194,26 +193,18 @@ async function handleCatalogOrder(waId, msg) {
     return;
   }
 
-  // 2) Totales y bolsas
-const subtotal = itemsForDb.reduce(
-  (s, it) => s + Number(it.qty_bags) * Number(it.unit_price), 0
-);
-const discountPct   = Number(customer.discount_pct || 0);
-const discountTotal = Math.round((subtotal * discountPct) / 100);
-const total         = subtotal - discountTotal;
-const totalBags     = itemsForDb.reduce((s, it) => s + Number(it.qty_bags), 0);
+  // Totales y bolsas
+  const subtotal = itemsForDb.reduce((s, it) => s + Number(it.line_total), 0);
+  const discountPct   = Number(customer.discount_pct || 0);
+  const discountTotal = Math.round((subtotal * discountPct) / 100);
+  const total         = subtotal - discountTotal;
+  const totalBags     = itemsForDb.reduce((s, it) => s + Number(it.qty_bags), 0);
 
-  // Items enriquecidos para scheduler
-  const richItems = [];
-  for (const it of itemsForDb) {
-    const prod = dbProducts.find((p) => p.id === it.product_id);
-    if (!prod) continue;
-    richItems.push({
-      product_id: prod.id,
-      pelletized: !!prod.pelletized,
-      qty_bags: it.qty_bags,
-    });
-  }
+  // Items para el scheduler (pelletizado)
+  const richItems = itemsForDb.map(it => {
+    const p = dbProducts.find(d => d.id === it.product_id);
+    return { product_id: it.product_id, pelletized: !!p?.pelletized, qty_bags: it.qty_bags };
+  });
 
   // Configuración con sábado hasta 12:00
   const schedCfg = {
@@ -225,41 +216,28 @@ const totalBags     = itemsForDb.reduce((s, it) => s + Number(it.qty_bags), 0);
     pellet_bph: 80,
     non_pellet_bph: 80,
     sat_workday_start: "08:00",
-    sat_workday_end: "12:00", // <- sábado hasta el mediodía
+    sat_workday_end: "12:00",
     sat_pellet_bph: 60,
     sat_non_pellet_bph: 60,
   };
 
-  // 1) Programación con flag de pelletizado
-const sch = await scheduleOrderForItems(
-  richItems.map(it => ({
-    product_id: it.product_id,
-    pelletized: !!(dbProducts.find(p => p.id === it.product_id)?.pelletized),
-    qty_bags: it.qty_bags,
-  })),
-  new Date(),
-  schedCfg
-);
+  const sch = await scheduleOrderForItems(richItems, new Date(), schedCfg);
 
-  // 3) Crear orden (nota: customer por relación y unit_price)
-const created = await prisma.order.create({
-  data: {
-    customer: { connect: { id: customer.id } },
-    status: "pending_payment",
-    scheduled_at: sch.scheduled_at,
-    ready_at: sch.ready_at,
-    subtotal: subtotal,
-    discount_total: discountTotal,
-    total: total,
-    total_bags: totalBags,
-    items: {
-      createMany: {
-        data: itemsForDb, // cada item: { product_id, qty_bags, unit_price }
-      },
+  // Crear orden (usar relación customer y campos existentes)
+  const created = await prisma.order.create({
+    data: {
+      customer: { connect: { id: customer.id } },
+      status: "pending_payment",
+      scheduled_at: sch.scheduled_at,
+      ready_at: sch.ready_at,
+      subtotal,
+      discount_total: discountTotal,
+      total,
+      total_bags: totalBags,
+      items: { createMany: { data: itemsForDb } },
     },
-  },
-  include: { items: true, customer: true },
-});
+    include: { items: true, customer: true },
+  });
 
   await sendText(
     waId,
@@ -267,20 +245,18 @@ const created = await prisma.order.create({
     `Subtotal: $${subtotal.toLocaleString("es-CO")}\n` +
     (discountTotal > 0 ? `Descuento: $${discountTotal.toLocaleString("es-CO")}\n` : "") +
     `Total: $${total.toLocaleString("es-CO")}\n` +
-    `Entrega estimada: ${new Date(created.delivery_at).toLocaleString("es-CO")}`
+    `Listo aprox.: ${new Date(created.ready_at).toLocaleString("es-CO")}`
   );
 }
 
 /* ========= Pedido por texto (SKU + cantidad) ========= */
 function parseSkuLines(text) {
-  // Acepta líneas tipo: "AVI 10", "AVI-1T 2", "AVI x10", "AVI * 10"
+  // Acepta: "AVI 10", "AVI-1T 2", "AVI x10", "AVI * 10"
   const lines = text.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
   const pairs = [];
   for (const line of lines) {
     const m = line.match(/^([A-Za-z0-9._-]+)\s*(?:x|\*)?\s*(\d+)$/i);
-    if (m) {
-      pairs.push({ sku: m[1], qty: Number(m[2]) });
-    }
+    if (m) pairs.push({ sku: m[1], qty: Number(m[2]) });
   }
   return pairs;
 }
@@ -288,7 +264,7 @@ function parseSkuLines(text) {
 async function handleSkuOrder(waId, text) {
   const pairs = parseSkuLines(text);
   if (!pairs.length) {
-    await sendText(waId, "No reconocí ninguna línea con formato \"SKU cantidad\". Ej: AVI 10");
+    await sendText(waId, 'No reconocí ninguna línea con formato "SKU cantidad". Ej: AVI 10');
     return;
   }
 
@@ -316,16 +292,18 @@ async function handleSkuOrder(waId, text) {
     });
   }
 
-  // Items a guardar
+  // Items a guardar (unit_price + line_total)
   const itemsForDb = [];
   const richItems = [];
   for (const { sku, qty } of pairs) {
     const p = bySku.get(sku);
     const bags = sku.endsWith("1T") ? qty * 25 : qty;
+    const unit = Number(p.price_per_bag);
     itemsForDb.push({
       product_id: p.id,
       qty_bags: bags,
-      unit_price: Number(p.price_per_bag), // entero COP
+      unit_price: unit,
+      line_total: bags * unit,
     });
     richItems.push({
       product_id: p.id,
@@ -334,10 +312,11 @@ async function handleSkuOrder(waId, text) {
     });
   }
 
-  const subtotal = itemsForDb.reduce((s, it) => s + Number(it.qty_bags) * Number(it.unit_price), 0);
+  const subtotal = itemsForDb.reduce((s, it) => s + Number(it.line_total), 0);
   const discountPct = Number(customer.discount_pct || 0);
   const discountTotal = Math.round((subtotal * discountPct) / 100);
   const total = subtotal - discountTotal;
+  const totalBags = itemsForDb.reduce((s, it) => s + Number(it.qty_bags), 0);
 
   const schedCfg = {
     timezone: "America/Bogota",
@@ -356,14 +335,14 @@ async function handleSkuOrder(waId, text) {
 
   const created = await prisma.order.create({
     data: {
-      customer_id: customer.id,
+      customer: { connect: { id: customer.id } },
       status: "pending_payment",
       scheduled_at: sch.scheduled_at,
       ready_at: sch.ready_at,
-      delivery_at: sch.delivery_at,
-      subtotal: subtotal,
+      subtotal,
       discount_total: discountTotal,
-      total: total,
+      total,
+      total_bags: totalBags,
       items: { createMany: { data: itemsForDb } },
     },
     include: { items: true, customer: true },
@@ -373,9 +352,9 @@ async function handleSkuOrder(waId, text) {
     waId,
     `Pedido recibido ✅\n` +
     `Subtotal: $${subtotal.toLocaleString("es-CO")}\n` +
-    (discountTotal > 0 ? `Descuento: $${discountTotal.toLocaleString("es-CO")}\n` : "") +
+    (discountTotal > 0 ? `Descuento: $${discountTotal.toLocaleString("es-CO")}\n" : "") +
     `Total: $${total.toLocaleString("es-CO")}\n` +
-    `Entrega estimada: ${new Date(sch.delivery_at).toLocaleString("es-CO")}`
+    `Listo aprox.: ${new Date(created.ready_at).toLocaleString("es-CO")}`
   );
 
   // Cierra modo ORDER_SKU
@@ -384,11 +363,11 @@ async function handleSkuOrder(waId, text) {
 
 /* ========= Enrutamiento de opciones 2/3/4 ========= */
 async function handoff(waId, area, targetNumber) {
-  const links = `https://wa.me/${targetNumber}`;
+  const link = `https://wa.me/${targetNumber}`;
   const txt = {
-    cartera:  "👉 En breve te comunicaremos con el área de cartera para resolver tu solicitud.\n\nAbre el chat aquí:\n" + links,
-    tecnico:  "👉 En breve te comunicaremos con un asesor técnico de Megaforza.\n\nAbre el chat aquí:\n" + links,
-    recepcion:"👉 En breve te comunicaremos con recepción.\n\nAbre el chat aquí:\n" + links,
+    cartera:  "👉 En breve te comunicaremos con el área de cartera para resolver tu solicitud.\n\nAbre el chat aquí:\n" + link,
+    tecnico:  "👉 En breve te comunicaremos con un asesor técnico de Megaforza.\n\nAbre el chat aquí:\n" + link,
+    recepcion:"👉 En breve te comunicaremos con recepción.\n\nAbre el chat aquí:\n" + link,
   }[area];
 
   await sendText(waId, txt);
@@ -402,7 +381,6 @@ async function handoff(waId, area, targetNumber) {
     `Escríbele directamente cuando puedas.`
   );
 
-  // Cerrar sesión
   sessions.delete(waId);
 }
 
@@ -446,7 +424,6 @@ app.post("/webhook", async (req, res) => {
           if ((type === "image" || type === "document")) {
             const session = sessions.get(waId);
             if (session?.state === "REG_RUT") {
-              // Guardamos el media_id en memoria (si deseas persistir, agrega columna en BD)
               session.draft.rut_media_id = msg.image?.id || msg.document?.id || null;
               await finalizeRegistration(waId, session);
               sessions.delete(waId);
@@ -462,7 +439,7 @@ app.post("/webhook", async (req, res) => {
             // 2.a Modo ORDER_SKU
             if (session.state === "ORDER_SKU") {
               if (/^lista$/i.test(t)) {
-                await sendText(waId, "Envía las líneas \"SKU cantidad\" antes de escribir \"lista\" 😉");
+                await sendText(waId, 'Envía las líneas "SKU cantidad" antes de escribir "lista" 😉');
                 continue;
               }
               await handleSkuOrder(waId, t);
@@ -509,7 +486,6 @@ app.post("/webhook", async (req, res) => {
 
             // 2.c Selección de menú (siempre disponible cuando no hay sesión)
             if (/^(men[uú]|hola)$/i.test(t) || !session.state) {
-              // Números 1..4
               const m = t.match(/^\s*([1-4])\s*$/);
               if (m) {
                 const opt = m[1];
@@ -526,27 +502,16 @@ app.post("/webhook", async (req, res) => {
                     await pushCatalog(waId);
                     sessions.set(waId, { state: "ORDER_SKU", draft: {} });
                   } else {
-                    // Inicia onboarding
                     sessions.set(waId, { state: "REG_NAME", draft: {} });
                     await sendText(waId, "Para registrarte, por favor dime tu nombre o el de tu empresa.");
                   }
                   continue;
                 }
-                if (opt === "2") {
-                  await handoff(waId, "cartera", AGENT_CARTERA);
-                  continue;
-                }
-                if (opt === "3") {
-                  await handoff(waId, "tecnico", AGENT_TECNICO);
-                  continue;
-                }
-                if (opt === "4") {
-                  await handoff(waId, "recepcion", AGENT_RECEPCION);
-                  continue;
-                }
+                if (opt === "2") { await handoff(waId, "cartera",  AGENT_CARTERA);  continue; }
+                if (opt === "3") { await handoff(waId, "tecnico",  AGENT_TECNICO);  continue; }
+                if (opt === "4") { await handoff(waId, "recepcion", AGENT_RECEPCION); continue; }
               }
 
-              // Si no mandó un número (o dijo hola/menú), mostrar menú
               await sendMenu(waId);
               sessions.set(waId, { state: "MENU", draft: {} });
               continue;

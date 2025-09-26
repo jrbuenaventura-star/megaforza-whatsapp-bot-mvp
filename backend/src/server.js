@@ -235,7 +235,6 @@ async function handleCatalogOrder(waId, msg) {
       status: "pending_payment",
       scheduled_at: sch.scheduled_at,
       ready_at: sch.ready_at,
-      delivery_at: sch.delivery_at,
       subtotal_cop: subtotal,
       discount_total_cop: discountTotal,
       total_cop: total,

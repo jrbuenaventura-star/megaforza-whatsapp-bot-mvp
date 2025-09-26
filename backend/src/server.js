@@ -194,11 +194,14 @@ async function handleCatalogOrder(waId, msg) {
     return;
   }
 
-  // Totales con descuento del cliente
-  const subtotal = itemsForDb.reduce((s, it) => s + Number(it.qty_bags) * Number(it.unit_price_cop), 0);
-  const discountPct = Number(customer.discount_pct || 0);
-  const discountTotal = Math.round((subtotal * discountPct) / 100);
-  const total = subtotal - discountTotal;
+  // 2) Totales y bolsas
+const subtotal = itemsForDb.reduce(
+  (s, it) => s + Number(it.qty_bags) * Number(it.unit_price), 0
+);
+const discountPct   = Number(customer.discount_pct || 0);
+const discountTotal = Math.round((subtotal * discountPct) / 100);
+const total         = subtotal - discountTotal;
+const totalBags     = itemsForDb.reduce((s, it) => s + Number(it.qty_bags), 0);
 
   // Items enriquecidos para scheduler
   const richItems = [];
@@ -227,21 +230,36 @@ async function handleCatalogOrder(waId, msg) {
     sat_non_pellet_bph: 60,
   };
 
-  const sch = await scheduleOrderForItems(richItems, new Date(), schedCfg);
+  // 1) Programación con flag de pelletizado
+const sch = await scheduleOrderForItems(
+  richItems.map(it => ({
+    product_id: it.product_id,
+    pelletized: !!(dbProducts.find(p => p.id === it.product_id)?.pelletized),
+    qty_bags: it.qty_bags,
+  })),
+  new Date(),
+  schedCfg
+);
 
-  const created = await prisma.order.create({
-    data: {
-      customer_id: customer.id,
-      status: "pending_payment",
-      scheduled_at: sch.scheduled_at,
-      ready_at: sch.ready_at,
-      subtotal: subtotal,
-      discount_total: discountTotal,
-      total: total,
-      items: { createMany: { data: itemsForDb } },
+  // 3) Crear orden (nota: customer por relación y unit_price)
+const created = await prisma.order.create({
+  data: {
+    customer: { connect: { id: customer.id } },
+    status: "pending_payment",
+    scheduled_at: sch.scheduled_at,
+    ready_at: sch.ready_at,
+    subtotal: subtotal,
+    discount_total: discountTotal,
+    total: total,
+    total_bags: totalBags,
+    items: {
+      createMany: {
+        data: itemsForDb, // cada item: { product_id, qty_bags, unit_price }
+      },
     },
-    include: { items: true, customer: true },
-  });
+  },
+  include: { items: true, customer: true },
+});
 
   await sendText(
     waId,
@@ -316,7 +334,7 @@ async function handleSkuOrder(waId, text) {
     });
   }
 
-  const subtotal = itemsForDb.reduce((s, it) => s + Number(it.qty_bags) * Number(it.unit_price_cop), 0);
+  const subtotal = itemsForDb.reduce((s, it) => s + Number(it.qty_bags) * Number(it.unit_price), 0);
   const discountPct = Number(customer.discount_pct || 0);
   const discountTotal = Math.round((subtotal * discountPct) / 100);
   const total = subtotal - discountTotal;
@@ -343,9 +361,9 @@ async function handleSkuOrder(waId, text) {
       scheduled_at: sch.scheduled_at,
       ready_at: sch.ready_at,
       delivery_at: sch.delivery_at,
-      subtotal_cop: subtotal,
-      discount_total_cop: discountTotal,
-      total_cop: total,
+      subtotal: subtotal,
+      discount_total: discountTotal,
+      total: total,
       items: { createMany: { data: itemsForDb } },
     },
     include: { items: true, customer: true },

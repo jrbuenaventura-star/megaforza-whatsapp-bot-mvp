@@ -184,8 +184,9 @@ async function handleCatalogOrder(waId, msg) {
       product_id: p.id,
       qty_bags: bags,
       unit_price: unit,
-      line_total: bags * unit,
-    });
+      line_total: bags * unit,  // <- requerido por Prisma
+  });
+
   }
 
   if (itemsForDb.length === 0) {
@@ -334,28 +335,28 @@ async function handleSkuOrder(waId, text) {
   const sch = await scheduleOrderForItems(richItems, new Date(), schedCfg);
 
   const created = await prisma.order.create({
-    data: {
-      customer: { connect: { id: customer.id } },
-      status: "pending_payment",
-      scheduled_at: sch.scheduled_at,
-      ready_at: sch.ready_at,
-      subtotal,
-      discount_total: discountTotal,
-      total,
-      total_bags: totalBags,
-      items: { createMany: { data: itemsForDb } },
-    },
-    include: { items: true, customer: true },
-  });
+  data: {
+    customer: { connect: { id: customer.id } },
+    status: "pending_payment",
+    scheduled_at: sch.scheduled_at,
+    ready_at: sch.ready_at,
+    subtotal: subtotal,
+    discount_total: discountTotal,
+    total: total,
+    total_bags: totalBags,
+    items: { createMany: { data: itemsForDb } }, // ahora con line_total
+  },
+  include: { items: true, customer: true },
+});
 
   await sendText(
-    waId,
-    `Pedido recibido ✅\n` +
-    `Subtotal: $${subtotal.toLocaleString("es-CO")}\n` +
-    (discountTotal > 0 ? `Descuento: $${discountTotal.toLocaleString("es-CO")}\n" : "") +
-    `Total: $${total.toLocaleString("es-CO")}\n` +
-    `Listo aprox.: ${new Date(created.ready_at).toLocaleString("es-CO")}`
-  );
+  waId,
+  `Pedido recibido ✅\n` +
+  `Subtotal: $${subtotal.toLocaleString("es-CO")}\n` +
+  (discountTotal > 0 ? `Descuento: $${discountTotal.toLocaleString("es-CO")}\n` : "") +
+  `Total: $${total.toLocaleString("es-CO")}\n` +
+  `Listo aprox.: ${new Date(created.ready_at).toLocaleString("es-CO")}`
+);
 
   // Cierra modo ORDER_SKU
   sessions.delete(waId);

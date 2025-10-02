@@ -4,7 +4,7 @@ import { prisma } from "./db.js";
 import { Prisma, OrderStatus } from "@prisma/client";
 import { scheduleOrderForItems } from "./scheduler.js";
 
-// ───────────────────────── helpers de serialización ─────────────────────────
+// ───────────────────────── helpers ─────────────────────────
 const toIntCOP = (v) => (v == null ? null : Math.round(Number(v)));
 const toNum    = (v) => (v == null ? null : Number(v));
 
@@ -18,15 +18,15 @@ function clamp(val, min, max) {
 const CANON_TO_DB = {
   pending_payment: "pending_payment",
   paid: "paid",
-  processing: "in_production",  // canónico → BD
+  processing: "in_production", // canónico → BD
   in_production: "in_production",
-  ready: "scheduled",           // canónico → BD
+  ready: "scheduled",          // canónico → BD
   scheduled: "scheduled",
   delivered: "delivered",
   canceled: "canceled",
 };
 
-const DB_ENUM = Prisma?.OrderStatus ?? OrderStatus ?? {};
+const DB_ENUM   = Prisma?.OrderStatus ?? OrderStatus ?? {};
 const DB_VALUES = new Set(Object.values(DB_ENUM));
 const DB_KEYS   = new Set(Object.keys(DB_ENUM));
 
@@ -35,7 +35,6 @@ function toDbStatus(maybe) {
   const s = String(maybe).trim().toLowerCase();
   const mapped = CANON_TO_DB[s] || s;
   if (DB_VALUES.has(mapped) || DB_KEYS.has(mapped)) {
-    // si pasa "IN_PRODUCTION" como key del enum, tradúcelo al valor
     return DB_ENUM[mapped] ?? mapped;
   }
   return null;
@@ -48,7 +47,7 @@ function toCanonStatus(dbValue) {
   return v;
 }
 
-// ───────────────────────── mapeo de productos y clientes ─────────────────────────
+// ───────────────────────── serialización ─────────────────────────
 function productOut(p) {
   return {
     id: p.id,
@@ -110,13 +109,13 @@ router.patch("/products/:id", async (req, res) => {
 
     if (req.body.name != null) data.name = String(req.body.name);
     if (req.body.active != null) data.active = Boolean(req.body.active);
+
     if (req.body.price_per_bag != null) {
       const v = Math.round(Number(req.body.price_per_bag));
       if (!Number.isFinite(v) || v < 0) {
         return res.status(400).json({ error: "invalid_price" });
       }
-      // Prisma Decimal acepta number/string sin problema
-      data.price_per_bag = v;
+      data.price_per_bag = v; // Prisma Decimal admite number/string
     }
 
     const updated = await prisma.product.update({
@@ -128,6 +127,7 @@ router.patch("/products/:id", async (req, res) => {
     try {
       const syncUrl = process.env.WA_CATALOG_SYNC_URL;
       if (syncUrl) {
+        // usar fetch global de Node 18+
         await fetch(syncUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -162,7 +162,7 @@ router.get("/customers", async (_req, res) => {
   }
 });
 
-// PATCH /customers/:id  { discount_pct?: number }
+// PATCH /customers/:id  { discount_pct?: number, name?, billing_email? }
 router.patch("/customers/:id", async (req, res) => {
   try {
     const id = String(req.params.id);
@@ -183,9 +183,7 @@ router.patch("/customers/:id", async (req, res) => {
   }
 });
 
-// ───────────────────────── órdenes ─────────────────────────
-
-// Util para filtros de fecha
+// ───────────────────────── util de fechas para filtros ─────────────────────────
 function daterangeFromQuery(token) {
   const now = new Date();
   const end = now;
@@ -209,9 +207,9 @@ function daterangeFromQuery(token) {
 // GET /orders?status=&customer=&date=week|month|thismonth
 router.get("/orders", async (req, res) => {
   try {
-    const qStatus = req.query.status?.toString();
+    const qStatus   = req.query.status?.toString();
     const qCustomer = req.query.customer?.toString();
-    const qDate = req.query.date?.toString();
+    const qDate     = req.query.date?.toString();
 
     const where = {};
 
@@ -219,7 +217,7 @@ router.get("/orders", async (req, res) => {
     const st = toDbStatus(qStatus);
     if (st) where.status = st;
 
-    // Cliente (por nombre contiene o id exacto)
+    // Cliente (nombre contiene o id exacto)
     if (qCustomer) {
       where.OR = [
         { customer: { name: { contains: qCustomer, mode: "insensitive" } } },
@@ -263,6 +261,7 @@ router.get("/orders", async (req, res) => {
         product: it.product ? productOut(it.product) : null,
         product_id: it.product_id,
         qty_bags: Number(it.qty_bags || 0),
+        // Nota: en GET no exponemos unit_price/line_total para no “fijar” históricos aquí.
       })),
     }));
 
@@ -311,7 +310,7 @@ router.patch("/orders/:id", async (req, res) => {
   }
 });
 
-// POST /orders  { customer_id, items:[{product_id, qty_bags}] }
+// POST /orders  { customer_id, items:[{product_id, qty_bags, unit_price?}] }
 router.post("/orders", async (req, res) => {
   try {
     const { customer_id, items } = req.body || {};
@@ -329,26 +328,44 @@ router.post("/orders", async (req, res) => {
     });
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    // Calcular totales
+    // Calcular totales e items enriquecidos con unit_price y line_total
     let subtotal = 0;
     let total_bags = 0;
+    const enrichedItems = [];
 
     for (const it of items) {
-      const p = byId.get(String(it.product_id));
-      if (!p) return res.status(400).json({ error: "product_not_found", product_id: it.product_id });
-      const qty = Number(it.qty_bags || 0);
-      if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ error: "invalid_qty", product_id: it.product_id });
+      const pid = String(it.product_id);
+      const p = byId.get(pid);
+      if (!p) return res.status(400).json({ error: "product_not_found", product_id: pid });
 
-      const unit = toIntCOP(p.price_per_bag);
-      subtotal += unit * qty;
+      const qty = Number(it.qty_bags || 0);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return res.status(400).json({ error: "invalid_qty", product_id: pid });
+      }
+
+      // Si viene unit_price en el payload, se respeta si es entero >= 0; si no, usar el del producto.
+      let unit_price = it.unit_price != null ? Math.round(Number(it.unit_price)) : toIntCOP(p.price_per_bag);
+      if (!Number.isFinite(unit_price) || unit_price < 0) {
+        return res.status(400).json({ error: "invalid_unit_price", product_id: pid });
+      }
+
+      const line_total = unit_price * qty;
+      subtotal += line_total;
       total_bags += qty;
+
+      enrichedItems.push({
+        product_id: pid,
+        qty_bags: qty,
+        unit_price,
+        line_total,
+      });
     }
 
-    const discountPct = clamp(customer.discount_pct ?? 0, 0, 100);
+    const discountPct    = clamp(customer.discount_pct ?? 0, 0, 100);
     const discount_total = Math.round((subtotal * discountPct) / 100);
-    const total = Math.max(0, subtotal - discount_total);
+    const total          = Math.max(0, subtotal - discount_total);
 
-    // Scheduling (usa configuración simple desde env o defaults)
+    // Scheduling (desde env o defaults)
     const schedCfg = {
       timezone: process.env.SCHED_TZ || "America/Bogota",
       workdays: process.env.SCHED_WORKDAYS || "Mon,Tue,Wed,Thu,Fri,Sat",
@@ -363,12 +380,12 @@ router.post("/orders", async (req, res) => {
       sat_workday_end:   process.env.SCHED_SAT_END   || "11:00",
     };
 
-    // Enriquecer items con pelletized para el scheduler
-    const schedItems = items.map((it) => {
-      const p = byId.get(String(it.product_id));
+    // Para scheduler solo necesitamos pelletized
+    const schedItems = enrichedItems.map((ei) => {
+      const p = byId.get(ei.product_id);
       return {
-        product_id: it.product_id,
-        qty_bags: Number(it.qty_bags || 0),
+        product_id: ei.product_id,
+        qty_bags: ei.qty_bags,
         pelletized: Boolean(p?.pelletized),
         sku: p?.sku,
       };
@@ -377,7 +394,7 @@ router.post("/orders", async (req, res) => {
     const { scheduled_at, ready_at, delivery_at } =
       await scheduleOrderForItems(schedItems, new Date(), schedCfg);
 
-    // Crear orden
+    // Crear orden + items (incluyendo unit_price y line_total requeridos por el esquema)
     const created = await prisma.order.create({
       data: {
         customer_id,
@@ -390,35 +407,38 @@ router.post("/orders", async (req, res) => {
         ready_at,
         delivery_at,
         items: {
-          create: items.map((it) => ({
-            product_id: String(it.product_id),
-            qty_bags: Number(it.qty_bags || 0),
+          create: enrichedItems.map((ei) => ({
+            product_id: ei.product_id,
+            qty_bags: ei.qty_bags,
+            unit_price: ei.unit_price,
+            line_total: ei.line_total,
           })),
         },
       },
       include: { customer: true, items: { include: { product: true } } },
     });
 
-    res.status(201).json({
-      order: {
-        id: created.id,
-        status: toCanonStatus(created.status),
-        customer: created.customer ? customerOut(created.customer) : null,
-        subtotal: toIntCOP(created.subtotal),
-        discount_total: toIntCOP(created.discount_total),
-        total: toIntCOP(created.total),
-        total_bags: Number(created.total_bags || 0),
-        scheduled_at: created.scheduled_at,
-        ready_at: created.ready_at,
-        delivery_at: created.delivery_at,
-        created_at: created.created_at,
-        items: created.items.map((it) => ({
-          id: it.id,
-          product: it.product ? productOut(it.product) : null,
-          product_id: it.product_id,
-          qty_bags: Number(it.qty_bags || 0),
-        })),
-      },
+    // Respuesta FLAT (top-level) para los smoke tests
+    return res.status(201).json({
+      id: created.id,
+      status: toCanonStatus(created.status),
+      customer: created.customer ? customerOut(created.customer) : null,
+      subtotal: toIntCOP(created.subtotal),
+      discount_total: toIntCOP(created.discount_total),
+      total: toIntCOP(created.total),
+      total_bags: Number(created.total_bags || 0),
+      scheduled_at: created.scheduled_at,
+      ready_at: created.ready_at,
+      delivery_at: created.delivery_at,
+      created_at: created.created_at,
+      items: created.items.map((it) => ({
+        id: it.id,
+        product: it.product ? productOut(it.product) : null,
+        product_id: it.product_id,
+        qty_bags: Number(it.qty_bags || 0),
+        unit_price: toIntCOP(it.unit_price),
+        line_total: toIntCOP(it.line_total),
+      })),
     });
   } catch (e) {
     console.error("POST /orders error", e);

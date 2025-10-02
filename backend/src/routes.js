@@ -326,110 +326,112 @@ router.post("/orders", async (req, res) => {
     const products = await prisma.product.findMany({ where: { id: { in: prodIds } } });
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    // Calcular totales y preparar items con precios
-    let subtotal = 0;
-    let total_bags = 0;
-    const itemsWithPrices = [];
+    // Calcular totales y preparar items con unit_price y line_total
+let subtotal = 0;
+let total_bags = 0;
+const calcItems = [];
 
-    for (const it of items) {
-      const pid = String(it.product_id);
-      const p = byId.get(pid);
-      if (!p) return res.status(400).json({ error: "product_not_found", product_id: it.product_id });
+for (const it of items) {
+  const p = byId.get(String(it.product_id));
+  if (!p) {
+    return res.status(400).json({ error: "product_not_found", product_id: it.product_id });
+  }
+  const qty = Number(it.qty_bags || 0);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    return res.status(400).json({ error: "invalid_qty", product_id: it.product_id });
+  }
 
-      const qty = Number(it.qty_bags || 0);
-      if (!Number.isFinite(qty) || qty <= 0) {
-        return res.status(400).json({ error: "invalid_qty", product_id: it.product_id });
-      }
+  const unit = toIntCOP(p.price_per_bag); // entero COP
+  const line_total = unit * qty;
 
-      // Precio por bulto (COP entero)
-      const unit = toIntCOP(p.price_per_bag);
-      const line = unit * qty;
+  subtotal += line_total;
+  total_bags += qty;
 
-      subtotal += line;
-      total_bags += qty;
+  // ⚠️ Estos campos deben existir si tu schema los marca como NOT NULL
+  calcItems.push({
+    product_id: String(it.product_id),
+    qty_bags: qty,
+    unit_price: unit,
+    line_total: line_total,
+  });
+}
 
-      itemsWithPrices.push({
-        product_id: pid,
-        qty_bags: qty,
-        unit_price: unit,   // <-- requerido por tu esquema
-        line_total: line,   // <-- requerido por tu esquema
-      });
-    }
+const discountPct = clamp(customer.discount_pct ?? 0, 0, 100);
+const discount_total = Math.round((subtotal * discountPct) / 100);
+const total = Math.max(0, subtotal - discount_total);
 
-    const discountPct = clamp(customer.discount_pct ?? 0, 0, 100);
-    const discount_total = Math.round((subtotal * discountPct) / 100);
-    const total = Math.max(0, subtotal - discount_total);
+// Scheduling (usa configuración simple desde env o defaults) … (deja tu código igual)
+const schedCfg = {
+  timezone: process.env.SCHED_TZ || "America/Bogota",
+  workdays: process.env.SCHED_WORKDAYS || "Mon,Tue,Wed,Thu,Fri,Sat",
+  dispatch_buffer_min: Number(process.env.SCHED_DISPATCH_BUFFER_MIN || 60),
+  pellet_bph: Number(process.env.SCHED_PELLET_BPH || 60),
+  non_pellet_bph: Number(process.env.SCHED_NON_PELLET_BPH || 60),
+  sat_pellet_bph: Number(process.env.SCHED_SAT_PELLET_BPH || 40),
+  sat_non_pellet_bph: Number(process.env.SCHED_SAT_NON_PELLET_BPH || 40),
+  workday_start: process.env.SCHED_START || "08:00",
+  workday_end:   process.env.SCHED_END   || "17:00",
+  sat_workday_start: process.env.SCHED_SAT_START || "08:00",
+  sat_workday_end:   process.env.SCHED_SAT_END   || "11:00",
+};
 
-    // Scheduling (como ya lo tenías)
-    const schedCfg = {
-      timezone: process.env.SCHED_TZ || "America/Bogota",
-      workdays: process.env.SCHED_WORKDAYS || "Mon,Tue,Wed,Thu,Fri,Sat",
-      dispatch_buffer_min: Number(process.env.SCHED_DISPATCH_BUFFER_MIN || 60),
-      pellet_bph: Number(process.env.SCHED_PELLET_BPH || 60),
-      non_pellet_bph: Number(process.env.SCHED_NON_PELLET_BPH || 60),
-      sat_pellet_bph: Number(process.env.SCHED_SAT_PELLET_BPH || 40),
-      sat_non_pellet_bph: Number(process.env.SCHED_SAT_NON_PELLET_BPH || 40),
-      workday_start: process.env.SCHED_START || "08:00",
-      workday_end:   process.env.SCHED_END   || "17:00",
-      sat_workday_start: process.env.SCHED_SAT_START || "08:00",
-      sat_workday_end:   process.env.SCHED_SAT_END   || "11:00",
-    };
+// Enriquecer items para el scheduler … (deja tu código igual)
+const schedItems = items.map((it) => {
+  const p = byId.get(String(it.product_id));
+  return {
+    product_id: it.product_id,
+    qty_bags: Number(it.qty_bags || 0),
+    pelletized: Boolean(p?.pelletized),
+    sku: p?.sku,
+  };
+});
 
-    const schedItems = itemsWithPrices.map((it) => {
-      const p = byId.get(it.product_id);
-      return {
-        product_id: it.product_id,
-        qty_bags: it.qty_bags,
-        pelletized: Boolean(p?.pelletized),
-        sku: p?.sku,
-      };
-    });
+const { scheduled_at, ready_at, delivery_at } =
+  await scheduleOrderForItems(schedItems, new Date(), schedCfg);
 
-    const { scheduled_at, ready_at, delivery_at } =
-      await scheduleOrderForItems(schedItems, new Date(), schedCfg);
+// Crear orden con items que incluyen unit_price y line_total
+const created = await prisma.order.create({
+  data: {
+    customer_id,
+    status: toDbStatus("pending_payment"),
+    subtotal,
+    discount_total,
+    total,
+    total_bags,
+    scheduled_at,
+    ready_at,
+    delivery_at,
+    items: {
+      create: calcItems,
+    },
+  },
+  include: { customer: true, items: { include: { product: true } } },
+});
 
-    // Crear orden con items que incluyen precios y line_total
-    const created = await prisma.order.create({
-      data: {
-        customer_id,
-        status: toDbStatus("pending_payment"),
-        subtotal,
-        discount_total,
-        total,
-        total_bags,
-        scheduled_at,
-        ready_at,
-        delivery_at,
-        items: {
-          create: itemsWithPrices, // <--- ahora incluye unit_price y line_total
-        },
-      },
-      include: { customer: true, items: { include: { product: true } } },
-    });
-
-    res.status(201).json({
-      order: {
-        id: created.id,
-        status: toCanonStatus(created.status),
-        customer: created.customer ? customerOut(created.customer) : null,
-        subtotal: toIntCOP(created.subtotal),
-        discount_total: toIntCOP(created.discount_total),
-        total: toIntCOP(created.total),
-        total_bags: Number(created.total_bags || 0),
-        scheduled_at: created.scheduled_at,
-        ready_at: created.ready_at,
-        delivery_at: created.delivery_at,
-        created_at: created.created_at,
-        items: created.items.map((it) => ({
-          id: it.id,
-          product: it.product ? productOut(it.product) : null,
-          product_id: it.product_id,
-          qty_bags: Number(it.qty_bags || 0),
-          unit_price: toIntCOP(it.unit_price),
-          line_total: toIntCOP(it.line_total),
-        })),
-      },
-    });
+// Respuesta (añadimos unit_price/line_total para verificación rápida)
+res.status(201).json({
+  order: {
+    id: created.id,
+    status: toCanonStatus(created.status),
+    customer: created.customer ? customerOut(created.customer) : null,
+    subtotal: toIntCOP(created.subtotal),
+    discount_total: toIntCOP(created.discount_total),
+    total: toIntCOP(created.total),
+    total_bags: Number(created.total_bags || 0),
+    scheduled_at: created.scheduled_at,
+    ready_at: created.ready_at,
+    delivery_at: created.delivery_at,
+    created_at: created.created_at,
+    items: created.items.map((it) => ({
+      id: it.id,
+      product: it.product ? productOut(it.product) : null,
+      product_id: it.product_id,
+      qty_bags: Number(it.qty_bags || 0),
+      unit_price: toIntCOP(it.unit_price),
+      line_total: toIntCOP(it.line_total),
+    })),
+  },
+});
   } catch (e) {
     console.error("POST /orders error", e);
     res.status(500).json({ error: "create_order_failed" });

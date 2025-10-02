@@ -390,6 +390,8 @@ const { scheduled_at, ready_at, delivery_at } =
   await scheduleOrderForItems(schedItems, new Date(), schedCfg);
 
 // Crear orden con items que incluyen unit_price y line_total
+// ...cálculos previos ya hechos (subtotal, discount_total, total, byId, etc.)
+
 const created = await prisma.order.create({
   data: {
     customer_id,
@@ -402,11 +404,23 @@ const created = await prisma.order.create({
     ready_at,
     delivery_at,
     items: {
-      create: calcItems,
+      create: items.map((it) => {
+        const p = byId.get(String(it.product_id));
+        const qty = Number(it.qty_bags || 0);
+        const unit = toIntCOP(p.price_per_bag);         // entero COP
+        const line = unit * qty;                         // entero COP
+        return {
+          product_id: String(it.product_id),
+          qty_bags: qty,
+          unit_price: unit,                              // 🔴 AÑADIDO
+          line_total: line,                              // 🔴 AÑADIDO
+        };
+      }),
     },
   },
   include: { customer: true, items: { include: { product: true } } },
 });
+
 
 // Respuesta (añadimos unit_price/line_total para verificación rápida)
 res.status(201).json({

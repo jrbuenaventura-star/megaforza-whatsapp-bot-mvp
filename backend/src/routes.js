@@ -310,7 +310,7 @@ router.patch("/orders/:id", async (req, res) => {
   }
 });
 
-// POST /orders  { customer_id, items:[{product_id, qty_bags, unit_price?}] }
+// POST /orders  { customer_id, items:[{product_id, qty_bags}] }
 router.post("/orders", async (req, res) => {
   try {
     const { customer_id, items } = req.body || {};
@@ -323,49 +323,44 @@ router.post("/orders", async (req, res) => {
 
     // Cargar productos
     const prodIds = items.map((i) => String(i.product_id));
-    const products = await prisma.product.findMany({
-      where: { id: { in: prodIds } },
-    });
+    const products = await prisma.product.findMany({ where: { id: { in: prodIds } } });
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    // Calcular totales e items enriquecidos con unit_price y line_total
+    // Calcular totales y preparar items con precios
     let subtotal = 0;
     let total_bags = 0;
-    const enrichedItems = [];
+    const itemsWithPrices = [];
 
     for (const it of items) {
       const pid = String(it.product_id);
       const p = byId.get(pid);
-      if (!p) return res.status(400).json({ error: "product_not_found", product_id: pid });
+      if (!p) return res.status(400).json({ error: "product_not_found", product_id: it.product_id });
 
       const qty = Number(it.qty_bags || 0);
       if (!Number.isFinite(qty) || qty <= 0) {
-        return res.status(400).json({ error: "invalid_qty", product_id: pid });
+        return res.status(400).json({ error: "invalid_qty", product_id: it.product_id });
       }
 
-      // Si viene unit_price en el payload, se respeta si es entero >= 0; si no, usar el del producto.
-      let unit_price = it.unit_price != null ? Math.round(Number(it.unit_price)) : toIntCOP(p.price_per_bag);
-      if (!Number.isFinite(unit_price) || unit_price < 0) {
-        return res.status(400).json({ error: "invalid_unit_price", product_id: pid });
-      }
+      // Precio por bulto (COP entero)
+      const unit = toIntCOP(p.price_per_bag);
+      const line = unit * qty;
 
-      const line_total = unit_price * qty;
-      subtotal += line_total;
+      subtotal += line;
       total_bags += qty;
 
-      enrichedItems.push({
+      itemsWithPrices.push({
         product_id: pid,
         qty_bags: qty,
-        unit_price,
-        line_total,
+        unit_price: unit,   // <-- requerido por tu esquema
+        line_total: line,   // <-- requerido por tu esquema
       });
     }
 
-    const discountPct    = clamp(customer.discount_pct ?? 0, 0, 100);
+    const discountPct = clamp(customer.discount_pct ?? 0, 0, 100);
     const discount_total = Math.round((subtotal * discountPct) / 100);
-    const total          = Math.max(0, subtotal - discount_total);
+    const total = Math.max(0, subtotal - discount_total);
 
-    // Scheduling (desde env o defaults)
+    // Scheduling (como ya lo tenías)
     const schedCfg = {
       timezone: process.env.SCHED_TZ || "America/Bogota",
       workdays: process.env.SCHED_WORKDAYS || "Mon,Tue,Wed,Thu,Fri,Sat",
@@ -380,12 +375,11 @@ router.post("/orders", async (req, res) => {
       sat_workday_end:   process.env.SCHED_SAT_END   || "11:00",
     };
 
-    // Para scheduler solo necesitamos pelletized
-    const schedItems = enrichedItems.map((ei) => {
-      const p = byId.get(ei.product_id);
+    const schedItems = itemsWithPrices.map((it) => {
+      const p = byId.get(it.product_id);
       return {
-        product_id: ei.product_id,
-        qty_bags: ei.qty_bags,
+        product_id: it.product_id,
+        qty_bags: it.qty_bags,
         pelletized: Boolean(p?.pelletized),
         sku: p?.sku,
       };
@@ -394,7 +388,7 @@ router.post("/orders", async (req, res) => {
     const { scheduled_at, ready_at, delivery_at } =
       await scheduleOrderForItems(schedItems, new Date(), schedCfg);
 
-    // Crear orden + items (incluyendo unit_price y line_total requeridos por el esquema)
+    // Crear orden con items que incluyen precios y line_total
     const created = await prisma.order.create({
       data: {
         customer_id,
@@ -407,43 +401,40 @@ router.post("/orders", async (req, res) => {
         ready_at,
         delivery_at,
         items: {
-          create: enrichedItems.map((ei) => ({
-            product_id: ei.product_id,
-            qty_bags: ei.qty_bags,
-            unit_price: ei.unit_price,
-            line_total: ei.line_total,
-          })),
+          create: itemsWithPrices, // <--- ahora incluye unit_price y line_total
         },
       },
       include: { customer: true, items: { include: { product: true } } },
     });
 
-    // Respuesta FLAT (top-level) para los smoke tests
-    return res.status(201).json({
-      id: created.id,
-      status: toCanonStatus(created.status),
-      customer: created.customer ? customerOut(created.customer) : null,
-      subtotal: toIntCOP(created.subtotal),
-      discount_total: toIntCOP(created.discount_total),
-      total: toIntCOP(created.total),
-      total_bags: Number(created.total_bags || 0),
-      scheduled_at: created.scheduled_at,
-      ready_at: created.ready_at,
-      delivery_at: created.delivery_at,
-      created_at: created.created_at,
-      items: created.items.map((it) => ({
-        id: it.id,
-        product: it.product ? productOut(it.product) : null,
-        product_id: it.product_id,
-        qty_bags: Number(it.qty_bags || 0),
-        unit_price: toIntCOP(it.unit_price),
-        line_total: toIntCOP(it.line_total),
-      })),
+    res.status(201).json({
+      order: {
+        id: created.id,
+        status: toCanonStatus(created.status),
+        customer: created.customer ? customerOut(created.customer) : null,
+        subtotal: toIntCOP(created.subtotal),
+        discount_total: toIntCOP(created.discount_total),
+        total: toIntCOP(created.total),
+        total_bags: Number(created.total_bags || 0),
+        scheduled_at: created.scheduled_at,
+        ready_at: created.ready_at,
+        delivery_at: created.delivery_at,
+        created_at: created.created_at,
+        items: created.items.map((it) => ({
+          id: it.id,
+          product: it.product ? productOut(it.product) : null,
+          product_id: it.product_id,
+          qty_bags: Number(it.qty_bags || 0),
+          unit_price: toIntCOP(it.unit_price),
+          line_total: toIntCOP(it.line_total),
+        })),
+      },
     });
   } catch (e) {
     console.error("POST /orders error", e);
     res.status(500).json({ error: "create_order_failed" });
   }
 });
+
 
 export default router;
